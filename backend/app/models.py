@@ -42,12 +42,21 @@ class StrictModel(BaseModel):
 
 
 class EngineId(str, Enum):
-    """Segmentation backends. `LOCAL` is the offline control — see docs/ENGINES.md."""
+    """Segmentation backends. `LOCAL` is the offline control — see docs/ENGINES.md.
+
+    `GEMINI_EDIT` is a deliberate, explicit exception to the project's own prime directive
+    (root CLAUDE.md: "only stage 1 is an AI API call... never route through a generative model" —
+    and even within stage 1, only commercial segmentation APIs were sanctioned, not a generative
+    editor). It exists at the maintainer's explicit request, disabled by default end to end
+    (GEMINI_EDIT_ENABLED=false, absent from ENGINE_POOL) so the deterministic dual-engine/local
+    path is exactly what runs unless someone deliberately opts in. See docs/ENGINES.md.
+    """
 
     PHOTOROOM = "photoroom"
     REMOVEBG = "removebg"
     FALAI = "falai"
     LOCAL = "local"
+    GEMINI_EDIT = "gemini_edit"
 
 
 class EngineStrategy(str, Enum):

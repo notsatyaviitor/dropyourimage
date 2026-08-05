@@ -9,7 +9,10 @@
 // Enums
 // ---------------------------------------------------------------------------
 
-export type EngineId = 'photoroom' | 'removebg' | 'falai' | 'local'
+// 'gemini_edit' is disabled server-side by default (GEMINI_EDIT_ENABLED=false) — see
+// backend/docs/ENGINES.md. Listed here only so `chosen_engine`/`candidates[].engine` type
+// correctly if someone deliberately turns it on; the UI adds no dedicated affordance for it.
+export type EngineId = 'photoroom' | 'removebg' | 'falai' | 'local' | 'gemini_edit'
 export type EngineStrategy = 'auto' | 'single'
 export type FitMode = 'contain' | 'pad' | 'cover'
 export type CentringMode = 'bbox' | 'centroid'

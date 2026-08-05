@@ -80,3 +80,64 @@ the table above), so wiring in a live call to a preview-tier model — 7–32s o
 network dependency, on top of an API key that would otherwise sit unused — was judged not worth
 it against unproven benefit. If a future bake-off finds real cases the deterministic scorer gets
 wrong on close ties, this is the place to connect it.
+
+## Gemini image-edit engine (`app/engines/gemini_edit.py`) — an explicit prime-directive override
+
+**This engine breaks the root `CLAUDE.md` rule on purpose, at the maintainer's explicit
+instruction, given with full knowledge of the conflict.** The rule: *"Only stage 1 (segmentation)
+is an AI API call... Never route [stages 2-5] through a generative or vision model"* — and even
+within stage 1, the sanctioned uses were commercial segmentation APIs plus the narrow, unwired
+tie-break above. A generative image editor was never on that list. The reasons the directive gives
+still apply in full to this engine:
+
+1. It is not byte-reproducible — a second call on the same input is not guaranteed to return the
+   same alpha, which breaks the determinism story the rest of this codebase is built to prove.
+2. It regenerates the pixels it touches. This integration keeps only the returned image's **alpha
+   channel** and discards the colour it invented (same `alpha_from_rgba_png` extraction every
+   commercial adapter uses, see `base.py`) — but the mask itself is still the output of a
+   generative pass over the image, not a matting/classification model, so its behaviour on a given
+   input is not guaranteed stable run to run.
+3. Cost and latency are materially higher per image than the commercial adapters — see the
+   pricing caveat below.
+
+### Why it exists anyway
+
+Requested directly, as an experiment/comparison path, with the explicit requirement that it be
+switchable — never the silent default — so the deterministic dual-engine/auto-pick behaviour this
+POC was built around stays exactly as-is unless someone deliberately opts in.
+
+### How it's gated (three independent locks, all default-closed)
+
+1. `GEMINI_EDIT_ENABLED=false` by default in `.env.example`. `GeminiEditEngine.available()`
+   returns `False` unless this is `true` **and** `GEMINI_API_KEY` is set.
+2. It is never in the default `ENGINE_POOL`, so the `AUTO` strategy's `select_pool()` will not
+   pick it up even if the flag above is flipped without also editing the pool.
+3. Requesting it explicitly via the `SINGLE` strategy (`cutout.engine = "gemini_edit"`) still goes
+   through `available()`, so lock #1 holds even then.
+
+**To try it:** set `GEMINI_EDIT_ENABLED=true`, confirm `GEMINI_API_KEY` is set, and either add
+`gemini_edit` to `ENGINE_POOL` (to enter the AUTO comparison pool) or request it by name via
+`SINGLE`. **To revert to the pre-existing behaviour:** set `GEMINI_EDIT_ENABLED=false` (or remove
+`gemini_edit` from `ENGINE_POOL`) — nothing else changes; the deterministic dual-engine/local path
+is exactly what runs.
+
+### What is NOT independently verified here (unlike the tie-break above)
+
+The tie-break section above has a measured table because that model call was actually exercised
+against the live API before being documented. This engine has **not** had the same treatment:
+
+- **Model id** (`GEMINI_EDIT_MODEL=gemini-2.5-flash-image`) — not confirmed against a live
+  `listModels` call the way `gemini-3-flash-preview` was. Check
+  <https://ai.google.dev/gemini-api/docs/image-generation> for the current id before relying on
+  this for a real demo.
+- **Request/response field names** (`responseModalities`, `inlineData`/`inline_data` casing) — the
+  code accepts either casing defensively (`_extract_image_bytes` in `gemini_edit.py`) precisely
+  *because* this wasn't nailed down against live traffic the way `http.py`'s vendor shapes are
+  flagged as needing re-confirmation.
+- **Pricing** (`_ESTIMATED_COST_USD = 0.04` in `gemini_edit.py`) — an estimate, not a verified
+  figure the way the commercial engines' costs are dated. Check
+  <https://ai.google.dev/gemini-api/docs/pricing> before enabling this anywhere real spend
+  matters.
+
+Do the same live-verification pass the tie-break table above went through before trusting this
+path for anything beyond an experiment.

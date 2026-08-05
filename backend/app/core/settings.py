@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     # gemini-3-flash-preview, so this will sometimes cut it off — that is the intended trade.
     gemini_timeout_seconds: float = 15.0
 
+    # --- Gemini image-edit engine (EXPLICIT OVERRIDE of the project's prime directive) ---------
+    # See docs/ENGINES.md "Gemini image-edit engine" section before touching any of this. Default
+    # OFF: false + absent from ENGINE_POOL, so the deterministic dual-engine/local path is exactly
+    # what runs unless this is deliberately switched on. To switch back to the pre-existing
+    # behaviour, either flip this back to false or drop "gemini_edit" out of ENGINE_POOL — nothing
+    # else needs to change.
+    gemini_edit_enabled: bool = False
+    # Not independently verified against a live listModels call the way GEMINI_MODEL was (see the
+    # tie-break's own comment above) — confirm this id is current before enabling for real spend.
+    gemini_edit_model: str = "gemini-2.5-flash-image"
+    gemini_edit_timeout_seconds: float = 30.0
+
     # --- Adobe (PSD) ----------------------------------------------------------
     adobe_client_id: str = ""
     adobe_client_secret: str = ""
@@ -114,6 +126,10 @@ class Settings(BaseSettings):
             EngineId.REMOVEBG: self.removebg_api_key,
             EngineId.FALAI: self.fal_key,
             EngineId.LOCAL: "n/a",
+            # Reuses GEMINI_API_KEY (the tie-break's key) rather than a separate credential — same
+            # Google AI Studio key covers both, and `available()` additionally requires
+            # gemini_edit_enabled, so this alone never turns the engine on.
+            EngineId.GEMINI_EDIT: self.gemini_api_key,
         }.get(engine, "")
 
     @property
@@ -126,6 +142,9 @@ class Settings(BaseSettings):
         return {
             "engines_configured": [e.value for e in self.engine_priority if self.key_for(e)],
             "gemini_tiebreak": bool(self.gemini_api_key),
+            # Surfaced deliberately: this is a prime-directive override (see docs/ENGINES.md), so
+            # /health must make it visible whenever it's actually live, not just log it quietly.
+            "gemini_edit_engine": self.gemini_edit_enabled and bool(self.gemini_api_key),
             "adobe_psd": self.adobe_configured,
             "upscaler": self.upscaler_enabled,
             "queue": self.queue_name,

@@ -344,6 +344,119 @@ class TestVendorAdapters:
         assert 0.03 <= FalAiEngine(s).cost_per_image_usd <= 0.05
 
 
+class TestGeminiEditEngine:
+    """The prime-directive override — see docs/ENGINES.md. Every gate here must default closed."""
+
+    def test_disabled_by_default(self):
+        from app.engines.gemini_edit import GeminiEditEngine
+
+        assert not GeminiEditEngine(Settings()).available()
+
+    def test_flag_alone_is_not_enough_without_a_key(self):
+        from app.engines.gemini_edit import GeminiEditEngine
+
+        s = Settings(gemini_edit_enabled=True, gemini_api_key="")
+        assert not GeminiEditEngine(s).available()
+
+    def test_key_alone_is_not_enough_without_the_flag(self):
+        from app.engines.gemini_edit import GeminiEditEngine
+
+        s = Settings(gemini_edit_enabled=False, gemini_api_key="k")
+        assert not GeminiEditEngine(s).available()
+
+    def test_available_only_with_both_flag_and_key(self):
+        from app.engines.gemini_edit import GeminiEditEngine
+
+        s = Settings(gemini_edit_enabled=True, gemini_api_key="k")
+        assert GeminiEditEngine(s).available()
+
+    async def test_calling_while_unavailable_gives_a_typed_error_not_a_network_call(self):
+        from app.core.errors import VendorUnauthorized
+        from app.engines.gemini_edit import GeminiEditEngine
+
+        with pytest.raises(VendorUnauthorized):
+            await GeminiEditEngine(Settings()).alpha_for(b"", 10, 10)
+
+    def test_not_in_the_default_engine_pool(self):
+        """Flipping the flag alone must not be enough to pull this into AUTO's pool."""
+        assert EngineId.GEMINI_EDIT not in Settings().engine_priority
+
+    def test_registry_ignores_it_even_if_pooled_but_not_enabled(self):
+        s = Settings(engine_pool="gemini_edit", gemini_edit_enabled=False, gemini_api_key="k")
+        assert [e.id for e in registry.select_pool(s, CutoutSpec())] == [EngineId.LOCAL]
+
+    def test_registry_uses_it_when_explicitly_pooled_and_enabled(self):
+        s = Settings(engine_pool="gemini_edit", gemini_edit_enabled=True, gemini_api_key="k")
+        pool = registry.select_pool(s, CutoutSpec())
+        assert [e.id for e in pool] == [EngineId.GEMINI_EDIT]
+
+
+class TestExtractImageBytes:
+    """Pure parsing helper — no network. Tolerant by design, like vision.py's _parse_verdict."""
+
+    def test_extracts_camel_case_inline_data(self):
+        from app.engines.gemini_edit import _extract_image_bytes
+
+        raw = b"not a real png, just bytes for the round-trip"
+        import base64
+
+        body = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "here you go"},
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": base64.b64encode(raw).decode("ascii"),
+                                }
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+        assert _extract_image_bytes(body) == raw
+
+    def test_extracts_snake_case_inline_data(self):
+        from app.engines.gemini_edit import _extract_image_bytes
+
+        raw = b"other bytes"
+        import base64
+
+        body = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/png",
+                                    "data": base64.b64encode(raw).decode("ascii"),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        assert _extract_image_bytes(body) == raw
+
+    def test_returns_none_when_no_image_part(self):
+        from app.engines.gemini_edit import _extract_image_bytes
+
+        body = {"candidates": [{"content": {"parts": [{"text": "I cannot edit this image."}]}}]}
+        assert _extract_image_bytes(body) is None
+
+    def test_returns_none_for_malformed_body(self):
+        from app.engines.gemini_edit import _extract_image_bytes
+
+        assert _extract_image_bytes({}) is None
+        assert _extract_image_bytes({"candidates": []}) is None
+        assert _extract_image_bytes("not even a dict") is None
+
+
 class TestBusySceneHandling:
     def test_a_lifestyle_shot_is_either_rejected_or_flagged(self):
         """Either outcome is honest. Producing a confident bad mask is not."""
