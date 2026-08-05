@@ -1,0 +1,85 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens as CSS custom properties, mirroring src/theme/tokens.ts. Tailwind v4's CSS-first
+ * @theme directive maps these onto utility classes (bg-navy, text-accent, rounded-button, etc.)
+ * so components can stay in Tailwind's usual utility style rather than reaching for inline styles
+ * or a CSS-in-JS layer. tokens.ts stays the source of truth for anything needed in plain
+ * TypeScript (checkerboard canvas math, non-utility styling); this file must not drift from it —
+ * see tokens.ts for where every value below actually came from.
+ */
+@theme {
+  --color-navy: #152339;
+  --color-navy-hover: #2a3951;
+  --color-link: #023a51;
+  --color-body: #474747;
+  --color-accent: #2cbc63;
+  --color-accent-light: #65bc7b;
+  --color-surface: #ffffff;
+  --color-page-bg: #e2e2e2;
+
+  --radius-button: 2px;
+  --radius-form: 8px;
+
+  --font-heading: Ubuntu, Arial, Helvetica, sans-serif;
+  --font-body: 'Open Sans', 'MS Sans Serif', Geneva, sans-serif;
+  --font-nav: Manrope, 'MS Sans Serif', Geneva, sans-serif;
+
+  --container-brand: 1260px;
+}
+
+/*
+ * Base element defaults belong in Tailwind's `base` layer, not as bare unlayered rules.
+ *
+ * Unlayered CSS always wins over ANY layered CSS in the cascade, regardless of selector
+ * specificity — that ordering is part of the CSS cascade-layers spec, not a specificity contest.
+ * Tailwind's utility classes (text-white, bg-navy, ...) live inside `@layer utilities`. A plain
+ * `h1 { color: ... }` rule written outside any @layer therefore beats `text-white` on an <h1>
+ * every time, even though `.text-white` has higher nominal specificity. Confirmed directly: with
+ * these rules unlayered, App.tsx's `<h1 className="text-white">DropYourImage</h1>` rendered navy
+ * text on the navy header background — invisible — because the unlayered h1 rule always won.
+ * Wrapping in `@layer base` fixes it by letting `base < components < utilities` govern instead.
+ */
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-body);
+    color: var(--color-body);
+    background: var(--color-page-bg);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-heading);
+    color: var(--color-navy);
+    font-weight: 700;
+  }
+}
+
+/* Checkerboard pattern for viewing transparency — see frontend/CLAUDE.md: reviewers must be able
+   to see edge quality honestly, which means showing real transparency, not a plausible fake. */
+.checkerboard {
+  background-image: linear-gradient(45deg, #d8dbe0 25%, transparent 25%),
+    linear-gradient(-45deg, #d8dbe0 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d8dbe0 75%),
+    linear-gradient(-45deg, transparent 75%, #d8dbe0 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-color: #f4f5f6;
+}

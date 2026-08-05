@@ -1,0 +1,44 @@
+# --- secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python / backend ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# --- test data: real client photographs stay local (see data/README.md) ---
+# Order matters twice over here — a later gitignore rule overrides an earlier one for the same
+# path, and git cannot re-include a FILE whose parent DIRECTORY is itself excluded. Putting
+# `!data/**/` first (an earlier attempt) let the excludes below override it straight back,
+# leaving nested .gitkeep files silently dropped (e.g. data/input/opaque/.gitkeep) — confirmed
+# directly with `git check-ignore -v`, not assumed. The excludes must come first, then
+# `!data/**/` un-ignores every directory so git still descends into them, then the specific
+# .gitkeep/README negations apply to the files themselves.
+data/input/**
+data/expected/**
+data/output/**
+!data/**/
+!data/**/.gitkeep
+!data/README.md
+
+# --- ICC profiles are licensed assets, not source ---
+backend/app/imaging/profiles/*.icc
+
+# --- local services / scratch ---
+.minio/
+*.log
+.DS_Store

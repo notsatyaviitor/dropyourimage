@@ -1,0 +1,15 @@
+# OPTIONAL — only needed if Adobe Firefly Services access does not land (it did not — no Adobe
+# credentials were provided for this build; see docs/PSD.md).
+#
+# pytoshop WRITES layered PSDs in pure Python. Kept out of requirements.txt on purpose: it builds
+# a Cython extension and is unmaintained (last release 1.2.1, no numpy upper bound declared in
+# its own metadata — verified directly; an earlier version of this comment overclaimed a
+# numpy<2 requirement that doesn't actually exist in pytoshop itself). A failed build here must
+# not block the imaging core or the test suite either way, hence the separate file.
+#
+# Install only when the fallback is actually triggered:
+#   pip install -r requirements-psd-fallback.txt
+#
+# If it fails to build, do not fight it. Drop to raster layer masks (cut-list item 6) and say so.
+
+pytoshop==1.2.1

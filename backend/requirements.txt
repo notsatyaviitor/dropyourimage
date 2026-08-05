@@ -1,0 +1,42 @@
+# DropYourImage POC — backend dependencies
+# Pinned deliberately: a 5-day sprint cannot absorb a surprise upstream break.
+# Every line needs a reason. If you add one without a reason, remove it.
+
+# --- determinism ---
+threadpoolctl==3.5.0               # forces BLAS to genuinely 1 thread — see app/__init__.py
+
+# --- imaging core (no AI, no network) ---
+numpy==1.26.4                     # all pixel maths; every imaging stage is float32 arrays
+                                  # held at 1.x: pytoshop (PSD fallback) predates numpy 2
+opencv-python-headless==4.10.0.84 # contours for centring, morphology for the edge band
+                                  # headless: no libGL on a server. Do NOT swap for opencv-python
+Pillow==10.4.0                    # decode/encode, EXIF, ICC read+write via ImageCms (littleCMS)
+
+# --- PSD ---
+psd-tools==1.9.31                 # READING PSDs for the output validator. Not a writer
+
+# --- API ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9           # multipart zip upload
+pydantic==2.9.2                   # the frozen contract in app/models.py
+pydantic-settings==2.5.2          # env-var config; keys never leave the server
+
+# --- queue ---
+rq==1.16.2
+redis==5.0.8
+
+# --- storage ---
+boto3==1.35.24                    # S3 API; points at MinIO locally
+
+# --- vendors ---
+httpx==0.27.2                     # async HTTP to segmentation APIs
+
+# --- security ---
+python-magic==0.4.27              # MIME sniffing on zip entries; extensions are not trusted
+                                  # needs libmagic1 (see scripts/setup.sh)
+
+# --- tests ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+# httpx.ASGITransport (used for API tests) ships in httpx itself — no extra package needed.

@@ -1,0 +1,52 @@
+"""Object storage behind a Protocol, so the backend never hard-codes S3.
+
+Two implementations: `s3.S3Storage` (MinIO locally, S3 in any real deployment) and
+`memory.MemoryStorage` for tests. Written against the real S3 API from day one rather than the
+local filesystem, so there is no port to do later.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class StorageBackend(Protocol):
+    def put(self, key: str, data: bytes, content_type: str) -> None:
+        """Store bytes. Overwrites silently — keys include a job id, so collisions are our bug."""
+        ...
+
+    def get(self, key: str) -> bytes:
+        """Retrieve bytes. Raises `KeyError` if absent."""
+        ...
+
+    def signed_url(self, key: str, ttl_seconds: int) -> str:
+        """A time-limited read URL.
+
+        Short-lived and unguessable, because output assets are the only thing this POC exposes
+        publicly and it has no auth. See docs/SECURITY.md.
+        """
+        ...
+
+    def exists(self, key: str) -> bool:
+        ...
+
+
+CONTENT_TYPES = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "tiff": "image/tiff",
+    "webp": "image/webp",
+    "psd": "image/vnd.adobe.photoshop",
+    "zip": "application/zip",
+}
+
+
+def content_type_for(filename: str) -> str:
+    return CONTENT_TYPES.get(filename.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+
+
+def job_key(job_id: str, *parts: str) -> str:
+    """Namespace every object under its job, so cleanup is a prefix delete."""
+    return "/".join(["jobs", job_id, *parts])
