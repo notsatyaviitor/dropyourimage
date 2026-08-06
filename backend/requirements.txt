@@ -31,6 +31,9 @@ boto3==1.35.24                    # S3 API; points at MinIO locally
 
 # --- vendors ---
 httpx==0.27.2                     # async HTTP to segmentation APIs
+huggingface_hub==1.26.0           # Inference Providers client (huggingface.py) — non-chat tasks'
+                                  # provider-specific wire formats aren't published, only the
+                                  # official client handles them correctly. No httpx version bump.
 
 # --- security ---
 python-magic==0.4.27              # MIME sniffing on zip entries; extensions are not trusted

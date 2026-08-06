@@ -23,7 +23,15 @@ class Settings(BaseSettings):
     photoroom_api_key: str = ""
     removebg_api_key: str = ""
     fal_key: str = ""
-    engine_pool: str = "photoroom,falai,removebg"
+    huggingface_api_key: str = ""
+    # briaai/RMBG-2.0 (the BiRefNet family). Per Hugging Face's own Inference Providers docs, this
+    # model is served ONLY through the fal-ai provider — same underlying vendor FalAiEngine already
+    # calls directly (http.py). Verified live against huggingface_hub 1.26.0: a real call routes to
+    # https://router.huggingface.co/fal-ai/fal-ai/bria/background/remove.
+    huggingface_model: str = "briaai/RMBG-2.0"
+    huggingface_provider: str = "fal-ai"
+    huggingface_timeout_seconds: float = 30.0
+    engine_pool: str = "photoroom,falai,removebg,huggingface"
 
     # --- auto-pick tie-break --------------------------------------------------
     gemini_api_key: str = ""
@@ -82,6 +90,7 @@ class Settings(BaseSettings):
         "photoroom_api_key",
         "removebg_api_key",
         "fal_key",
+        "huggingface_api_key",
         "gemini_api_key",
         "adobe_client_id",
         "adobe_client_secret",
@@ -130,6 +139,7 @@ class Settings(BaseSettings):
             # Google AI Studio key covers both, and `available()` additionally requires
             # gemini_edit_enabled, so this alone never turns the engine on.
             EngineId.GEMINI_EDIT: self.gemini_api_key,
+            EngineId.HUGGINGFACE: self.huggingface_api_key,
         }.get(engine, "")
 
     @property

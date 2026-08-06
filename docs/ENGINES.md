@@ -81,6 +81,65 @@ network dependency, on top of an API key that would otherwise sit unused — was
 it against unproven benefit. If a future bake-off finds real cases the deterministic scorer gets
 wrong on close ties, this is the place to connect it.
 
+## Hugging Face Inference Providers engine (`app/engines/huggingface.py`) — a normal commercial engine
+
+**Not a prime-directive exception.** Background removal via a commercial segmentation API is
+exactly what stage 1 is meant to be — this is the fourth engine of that kind, alongside Photoroom,
+remove.bg and fal.ai. It targets `briaai/RMBG-2.0` (the BiRefNet family), gated only by
+`HUGGINGFACE_API_KEY` being set, same as the other three.
+
+### Why it exists alongside `FalAiEngine`, not instead of it
+
+Per Hugging Face's own Inference Providers docs (`docs/api-inference/tasks/image-segmentation`),
+`briaai/RMBG-2.0` is served **only through the `fal-ai` provider** — the exact same vendor
+`FalAiEngine` (`http.py`) already calls directly at `https://fal.run/fal-ai/birefnet/v2`. Adding
+this engine does not add a new vendor to the bake-off; it adds a second way to pay for the same
+one — useful specifically when a Hugging Face token is preferred over opening a separate fal.ai
+account, e.g. because billing is already consolidated there.
+
+### What was verified live before this was written, and how
+
+Unlike the Gemini image-edit engine's model id and field-name warnings, every load-bearing claim
+about this integration was checked against a real call before being written down:
+
+- **The client library, not hand-rolled HTTP.** Hugging Face's own docs are explicit that non-chat
+  tasks route through provider-specific wire formats that "may vary between providers" and are
+  only handled correctly by the official client libraries — the raw HTTP shape for the `fal-ai`
+  provider is not published for direct use. `huggingface_hub`'s `AsyncInferenceClient` is used
+  instead of `httpx` for exactly this reason.
+- **Method signature**, confirmed via `inspect.signature` against the installed
+  `huggingface_hub==1.26.0`: `image_segmentation(image, *, model=None, ...)` on the client, with
+  `provider` and `token` set at `InferenceClient(provider=..., token=..., timeout=...)`
+  construction time, not per-call.
+- **Response shape**: a `list[ImageSegmentationOutputElement]`, each with `.label`, `.score`, and
+  `.mask` — and `.mask` arrives as an **already-decoded `PIL.Image`** (mode `"L"`), not a base64
+  string the way the raw API table describes it. The client handles that decode step.
+- **Error classification**: triggered a real live call with a deliberately invalid token and
+  inspected the actual exception — `HfHubHTTPError` (raised via the library's own
+  `hf_raise_for_status`) carries a real `.response.status_code` (confirmed: `401`), so it classifies
+  onto the same taxonomy `http.py` uses. `InferenceTimeoutError` is a separate exception (not a
+  subclass of `HfHubHTTPError`) for the model-unavailable/timeout case.
+- **The actual routed URL**, from that same live call's error message:
+  `https://router.huggingface.co/fal-ai/fal-ai/bria/background/remove?_subdomain=queue` — matching
+  the `providerModelId: "fal-ai/bria/background/remove"` mapping the docs describe for this model
+  under the `fal-ai` provider.
+
+### What is NOT verified
+
+- **Pricing.** Hugging Face states Inference Providers pass through the underlying provider's rate
+  with no markup, but the actual fal.ai rate for `fal-ai/bria/background/remove` was not confirmed
+  against a real successful (non-error) call — `_ESTIMATED_COST_USD = 0.02` in `huggingface.py` is
+  a placeholder. Check <https://huggingface.co/docs/inference-providers/pricing> before relying on
+  it for real spend.
+- **Multi-segment responses.** RMBG-2.0 is a background-removal-specific model, so a single-segment
+  result is the expected shape and is what `_pick_alpha()` is built around (falling back to the
+  highest-confidence segment if more than one comes back) — that fallback path has not itself been
+  exercised against a real multi-segment response.
+- **A real successful segmentation call end to end** — the live verification above deliberately used
+  an invalid token to check error classification without needing a real credential; the happy path
+  (an actual mask coming back and improving on the `local` engine's output) still needs checking
+  once a real `HUGGINGFACE_API_KEY` is available.
+
 ## Gemini image-edit engine (`app/engines/gemini_edit.py`) — an explicit prime-directive override
 
 **This engine breaks the root `CLAUDE.md` rule on purpose, at the maintainer's explicit

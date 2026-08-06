@@ -11,6 +11,7 @@ from app.core.settings import Settings
 from app.engines.base import BackgroundRemover
 from app.engines.gemini_edit import GeminiEditEngine
 from app.engines.http import FalAiEngine, PhotoroomEngine, RemoveBgEngine
+from app.engines.huggingface import HuggingFaceEngine
 from app.engines.local import LocalEngine
 from app.models import CutoutSpec, EngineId, EngineStrategy
 
@@ -18,6 +19,9 @@ _CONSTRUCTORS = {
     EngineId.PHOTOROOM: PhotoroomEngine,
     EngineId.REMOVEBG: RemoveBgEngine,
     EngineId.FALAI: FalAiEngine,
+    # A normal commercial engine like the three above — gated only by key presence, same as them.
+    # See docs/ENGINES.md; unlike GEMINI_EDIT below, this is not a prime-directive exception.
+    EngineId.HUGGINGFACE: HuggingFaceEngine,
     # Built and registered, but ignored by AUTO unless "gemini_edit" is deliberately added to
     # ENGINE_POOL — its own `available()` gate (GEMINI_EDIT_ENABLED + a key) is a second,
     # independent lock on top of that. See docs/ENGINES.md — this is an explicit prime-directive

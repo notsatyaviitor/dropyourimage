@@ -20,9 +20,46 @@ from app.models import ImageState, JobState, OutputFormat
 
 @pytest.fixture(autouse=True)
 def _clean_state():
+    """Every test in this file is built around the deterministic `local` engine running for free,
+    with no vendor call (see `tiny_png()` below, and the module docstring). That has always been
+    an implicit assumption of a clean `backend/.env` — true until this session's live experiments
+    started setting real engine-selecting values there (GEMINI_EDIT_ENABLED=true, a real
+    GEMINI_API_KEY). Left alone, `get_settings()` picks those up (it is not overridden anywhere in
+    the API dependency chain — several call sites use it directly rather than through FastAPI's
+    `Depends`, so overriding just the route dependency would not be enough), routing every job in
+    this file to a live, billed, quota-blocked Gemini call instead of the local engine under test.
+
+    Forces the engine-selecting env vars back to neutral for the duration of each test, using the
+    same `os.environ` + `get_settings.cache_clear()` technique the capped-upload test below already
+    uses for the same reason (isolating `get_settings()` from ambient `.env` state) — restores the
+    "pytest needs no API keys" invariant `backend/CLAUDE.md` states, regardless of what the actual
+    `backend/.env` mid-experiment currently contains. Does not touch that file itself.
+    """
+    import os
+
+    from app.core.settings import get_settings
+
+    neutral = {
+        "PHOTOROOM_API_KEY": "",
+        "REMOVEBG_API_KEY": "",
+        "FAL_KEY": "",
+        "HUGGINGFACE_API_KEY": "",
+        "GEMINI_EDIT_ENABLED": "false",
+    }
+    previous = {k: os.environ.get(k) for k in neutral}
+    os.environ.update(neutral)
+    get_settings.cache_clear()
+
     reset_memory_backends()
     yield
     reset_memory_backends()
+
+    for k, v in previous.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    get_settings.cache_clear()
 
 
 @pytest.fixture

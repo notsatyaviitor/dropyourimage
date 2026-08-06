@@ -57,6 +57,10 @@ class EngineId(str, Enum):
     FALAI = "falai"
     LOCAL = "local"
     GEMINI_EDIT = "gemini_edit"
+    # A normal commercial segmentation engine, NOT a prime-directive exception — background removal
+    # via Hugging Face's Inference Providers (routed through fal-ai to briaai/RMBG-2.0, same model
+    # family FalAiEngine already calls directly). See docs/ENGINES.md.
+    HUGGINGFACE = "huggingface"
 
 
 class EngineStrategy(str, Enum):

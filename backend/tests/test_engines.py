@@ -6,8 +6,11 @@ real keys and is marked `needs_keys`.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
+from PIL import Image
 
 from app.core.settings import Settings
 from app.engines import autopick, registry
@@ -274,8 +277,21 @@ class TestChoose:
 
 class TestRegistry:
     def test_falls_back_to_the_control_engine_with_no_keys(self):
-        """What keeps procurement off the critical path."""
-        pool = registry.select_pool(Settings(photoroom_api_key="", removebg_api_key="", fal_key=""), CutoutSpec())
+        """What keeps procurement off the critical path.
+
+        Every key AND the flagged engines' own gates explicitly forced off — a real backend/.env
+        mid-experiment (GEMINI_EDIT_ENABLED=true, a real GEMINI_API_KEY) would otherwise leak
+        through bare/partial Settings() and break hermeticity, since env vars outrank the class
+        default in pydantic-settings' source order.
+        """
+        s = Settings(
+            photoroom_api_key="",
+            removebg_api_key="",
+            fal_key="",
+            huggingface_api_key="",
+            gemini_edit_enabled=False,
+        )
+        pool = registry.select_pool(s, CutoutSpec())
         assert [e.id for e in pool] == [EngineId.LOCAL]
 
     def test_auto_uses_the_first_two_available_in_priority_order(self):
@@ -344,13 +360,120 @@ class TestVendorAdapters:
         assert 0.03 <= FalAiEngine(s).cost_per_image_usd <= 0.05
 
 
+class TestHuggingFaceEngine:
+    """A normal commercial engine (see docs/ENGINES.md) — gated only by key presence, like
+    Photoroom/remove.bg/fal.ai, not the extra locks GEMINI_EDIT needs."""
+
+    def test_unconfigured_reports_unavailable(self):
+        from app.engines.huggingface import HuggingFaceEngine
+
+        assert not HuggingFaceEngine(Settings(huggingface_api_key="")).available()
+        assert HuggingFaceEngine(Settings(huggingface_api_key="hf_x")).available()
+
+    async def test_calling_an_unconfigured_engine_gives_a_typed_error(self):
+        from app.core.errors import VendorUnauthorized
+        from app.engines.huggingface import HuggingFaceEngine
+
+        with pytest.raises(VendorUnauthorized):
+            await HuggingFaceEngine(Settings(huggingface_api_key="")).alpha_for(b"", 10, 10)
+
+    def test_in_the_default_engine_pool(self):
+        """Unlike gemini_edit, this is a sanctioned commercial engine — listed by default like the
+        other three, gated only by whether a key is actually set.
+
+        Checks the field's declared default directly (not `Settings().engine_priority`) because a
+        real `backend/.env` on the machine running these tests can override `ENGINE_POOL` — as it
+        does here, since it's mid-experiment with GEMINI_EDIT_ENABLED. Bare `Settings()` reads that
+        real file, not just the class default, so it is not hermetic for this assertion.
+        """
+        default_pool = Settings.model_fields["engine_pool"].default
+        assert EngineId.HUGGINGFACE.value in default_pool.split(",")
+
+    def test_registry_falls_back_to_local_when_no_huggingface_key(self):
+        # gemini_edit_enabled forced off: an ambient backend/.env mid-experiment (this machine's
+        # right now) sets GEMINI_EDIT_ENABLED=true + a real key, which would otherwise win the pool
+        # instead of falling back to LOCAL — see _clean_state in test_api.py for the same issue.
+        s = Settings(
+            photoroom_api_key="",
+            removebg_api_key="",
+            fal_key="",
+            huggingface_api_key="",
+            gemini_edit_enabled=False,
+        )
+        assert [e.id for e in registry.select_pool(s, CutoutSpec())] == [EngineId.LOCAL]
+
+    def test_registry_uses_it_when_it_is_the_only_key_set(self):
+        # engine_pool forced explicitly too: an ambient backend/.env's ENGINE_POOL may not list
+        # "huggingface" at all (it doesn't, on this machine mid-experiment), and select_pool only
+        # ever considers engines present in the pool regardless of key availability.
+        s = Settings(
+            photoroom_api_key="",
+            removebg_api_key="",
+            fal_key="",
+            huggingface_api_key="hf_x",
+            gemini_edit_enabled=False,
+            engine_pool="huggingface",
+        )
+        assert [e.id for e in registry.select_pool(s, CutoutSpec())] == [EngineId.HUGGINGFACE]
+
+    def test_error_classification_matches_the_http_taxonomy(self):
+        """Verified live: a real HfHubHTTPError carries `.response.status_code` — see
+        docs/ENGINES.md for the actual call this was checked against."""
+        from app.core.errors import VendorError, VendorRateLimited, VendorUnauthorized
+        from app.engines.huggingface import _classify
+
+        class _FakeResponse:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        class _FakeExc:
+            def __init__(self, status_code):
+                self.response = _FakeResponse(status_code)
+
+        assert isinstance(_classify(_FakeExc(401)), VendorUnauthorized)
+        assert isinstance(_classify(_FakeExc(429)), VendorRateLimited)
+        assert isinstance(_classify(_FakeExc(500)), VendorError)
+        assert isinstance(_classify(_FakeExc(400)), VendorError)
+
+    def test_pick_alpha_extracts_the_single_segment(self):
+        from app.engines.huggingface import _pick_alpha
+
+        mask = Image.new("L", (10, 8), color=255)
+        mask.putpixel((0, 0), 0)
+        result = SimpleNamespace(label="foreground", score=0.98, mask=mask)
+
+        alpha = _pick_alpha([result])
+        assert alpha.shape == (8, 10)
+        assert alpha.dtype == np.float32
+        assert alpha[0, 0] == pytest.approx(0.0)
+        assert alpha[4, 4] == pytest.approx(1.0)
+
+    def test_pick_alpha_keeps_the_highest_score_when_multiple_segments_come_back(self):
+        """Not independently verified against a real multi-segment response — see docs/ENGINES.md."""
+        from app.engines.huggingface import _pick_alpha
+
+        low = SimpleNamespace(label="a", score=0.2, mask=Image.new("L", (4, 4), color=0))
+        high = SimpleNamespace(label="b", score=0.9, mask=Image.new("L", (4, 4), color=255))
+
+        alpha = _pick_alpha([low, high])
+        assert alpha.max() == pytest.approx(1.0)
+
+    def test_pick_alpha_rejects_an_empty_result_list(self):
+        from app.core.errors import VendorError
+        from app.engines.huggingface import _pick_alpha
+
+        with pytest.raises(VendorError):
+            _pick_alpha([])
+
+
 class TestGeminiEditEngine:
     """The prime-directive override — see docs/ENGINES.md. Every gate here must default closed."""
 
     def test_disabled_by_default(self):
-        from app.engines.gemini_edit import GeminiEditEngine
-
-        assert not GeminiEditEngine(Settings()).available()
+        """Checks the field's declared default (not `GeminiEditEngine(Settings())`) — a real
+        `backend/.env` can override GEMINI_EDIT_ENABLED, as it does on this machine mid-experiment,
+        so bare `Settings()` is not hermetic for this assertion. See the huggingface test above."""
+        assert Settings.model_fields["gemini_edit_enabled"].default is False
 
     def test_flag_alone_is_not_enough_without_a_key(self):
         from app.engines.gemini_edit import GeminiEditEngine
@@ -374,12 +497,20 @@ class TestGeminiEditEngine:
         from app.core.errors import VendorUnauthorized
         from app.engines.gemini_edit import GeminiEditEngine
 
+        # Explicit kwargs, not bare Settings() — forces the unavailable state under test rather
+        # than relying on ambient .env absence (see test_disabled_by_default above).
+        s = Settings(gemini_edit_enabled=False, gemini_api_key="")
         with pytest.raises(VendorUnauthorized):
-            await GeminiEditEngine(Settings()).alpha_for(b"", 10, 10)
+            await GeminiEditEngine(s).alpha_for(b"", 10, 10)
 
     def test_not_in_the_default_engine_pool(self):
-        """Flipping the flag alone must not be enough to pull this into AUTO's pool."""
-        assert EngineId.GEMINI_EDIT not in Settings().engine_priority
+        """Flipping the flag alone must not be enough to pull this into AUTO's pool.
+
+        Checks the field's declared default directly, not `Settings().engine_priority` — see
+        test_disabled_by_default above for why bare `Settings()` isn't hermetic here.
+        """
+        default_pool = Settings.model_fields["engine_pool"].default
+        assert EngineId.GEMINI_EDIT.value not in default_pool.split(",")
 
     def test_registry_ignores_it_even_if_pooled_but_not_enabled(self):
         s = Settings(engine_pool="gemini_edit", gemini_edit_enabled=False, gemini_api_key="k")
