@@ -1,4 +1,8 @@
 @import 'tailwindcss';
+/* The ported design system. Loaded after Tailwind so its class rules win over utilities where both
+   target an element — which is what we want, since the wizard UI is styled entirely by these
+   classes. Its global reset was moved into @layer base below; see styles/poc.css for why. */
+@import './styles/poc.css';
 
 /*
  * Design tokens as CSS custom properties, mirroring src/theme/tokens.ts. Tailwind v4's CSS-first
@@ -49,11 +53,23 @@
     box-sizing: border-box;
   }
 
+  /* Taken over from the design prototype's own global block, which had to be stripped out of
+     styles/poc.css because unlayered rules there would beat every Tailwind utility. */
+  html,
+  body {
+    height: 100%;
+  }
+
   body {
     margin: 0;
     font-family: var(--font-body);
     color: var(--color-body);
-    background: var(--color-page-bg);
+    /* The wizard shell is full-bleed navy behind a sticky sidebar, so the page background is navy
+       rather than the marketing site's grey. */
+    background: var(--color-navy);
+    font-size: 16px;
+    line-height: 1.7;
+    letter-spacing: 0.008em;
   }
 
   h1,

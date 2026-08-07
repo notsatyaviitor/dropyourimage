@@ -97,7 +97,11 @@ class Profile:
 
     name: str
     icc_name: str
-    """Filename expected in ``app/imaging/profiles/`` for embedding. See docs/ARCHITECTURE.md."""
+    """Human-readable profile name, used in output metadata and error messages.
+
+    Not a path: ICC bytes are synthesised at run time by ``app/imaging/icc.py`` rather than read
+    from disk, so there is no ``profiles/`` directory to keep in sync.
+    """
 
     def decode(self, encoded: np.ndarray) -> np.ndarray:
         raise NotImplementedError

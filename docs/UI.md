@@ -1,6 +1,6 @@
 # Frontend UI
 
-Five tabs configure one `JobConfig`; one upload runs the whole pipeline once. See
+A four-step order wizard configures one `JobConfig`; one upload runs the whole pipeline once. See
 `frontend/CLAUDE.md` for the working rules this section summarises.
 
 ## Brand — pulled from the live site, not eyeballed
@@ -26,12 +26,40 @@ and read the theme's inline CSS custom properties:
 **Correction worth flagging:** an earlier casual visual pass called the accent "blue". The actual
 CSS says green. `frontend/src/theme/tokens.ts` is the source of truth going forward.
 
-## Tab structure
+## Structure — an order wizard, not a tab strip
 
-Tabs mirror the pipeline stage order and reuse the client's own service vocabulary where it
-exists (per the delivery plan): **Clipping** (cutout), **Background Services** (hex/shadow),
-**Size** (canvas + output formats), **Centring**, **PSD**. All five edit slices of one
-`JobConfig` object held in `App.tsx` — there is one job per upload, not five separate tools.
+The UI follows the platform's own order flow, ported from the design prototype in
+`docs/design-prototype/`: a sticky product sidebar plus four steps —
+**Specification → Upload method → Upload → Complete**.
+
+Step 1 is a specification card built from *service rows*, reusing the client's own service
+vocabulary: **Clipping**, **Background Services**, **Output Size**, **Auto-Centre**, **Layered PSD**.
+Each row expands to the controls for that stage. Every `JobConfig` field is reachable — the prototype
+showed only three services, and the omitted ones are not cosmetic: without `cutout.subject_prompt`, a
+photograph containing several objects silently yields a cut-out of the wrong one.
+
+There is still **one job per order**. The steps are a submission flow, not four separate jobs.
+
+### What is shown but deliberately inert
+
+Features with no backend behind them are rendered visibly disabled and labelled, so a stakeholder can
+see where this POC sits in the product without a dead control implying a broken build or a live-looking
+one implying capability that does not exist:
+
+- Dashboard, Orders, Specifications, Invoices, Account, Help — sidebar context only
+- SFTP upload — the API accepts one multipart zip and nothing else. Its credential fields were left
+  out rather than shown going nowhere; a password box that discards input invites a real password.
+- Log out — there is no auth in this POC
+
+Pricing is absent entirely. The prototype carried `€ 9.65` per image plus VAT and a total; this POC
+has no billing model, and a figure on screen becomes a quote.
+
+### Progress is images finished, not stages elapsed
+
+The prototype's overlay advanced four stage rows on a 1100 ms timer and always reached 100%. The API
+reports per-image completion, not per-stage telemetry (see `API_CONTRACT.md`), so the ring shows
+**images finished out of total** and the stage rows are captioned as the pipeline's fixed order rather
+than as measured timings. It can also end in failure, which the prototype had no state for.
 
 ## A real bug found by actually running it, not by compiling it
 

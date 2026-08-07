@@ -49,9 +49,49 @@ _CLEAN_PERCENTILE = 70.0
 # room is far above it.
 _UNIFORMITY_TOLERANCE = 0.05
 
-# Gate threshold. Provisional — tune against data/input/shadow/ once real photographs land, and
-# record the chosen value here.
+# Gate threshold. Left at 0.50 deliberately, and the reasoning is worth recording because the
+# obvious change here is the wrong one.
+#
+# Measured 6 Aug 2026:
+#
+#     synthetic studio sweep, real cast shadow   0.9590
+#     man photographed against a panelled wall   0.6643   <- produced a real, reported bug
+#     synthetic busy scene                       0.0000
+#
+# Raising the gate to ~0.85 would refuse the wall case, and was tried. It was reverted: there is no
+# measurement of what a *real* studio photograph scores — `data/input/` holds no packshots — and real
+# sensor noise, vignetting and sweep seams will all score below a clean synthetic fixture. Raising
+# this on one data point risks silently disabling a working feature on exactly the images it is for.
+#
+# The wall case is caught by `_MAX_SHADOW_COVERAGE` instead, which measures the actual failure rather
+# than a proxy for it. This gate keeps its original job: refusing a backdrop too non-uniform for the
+# plate fit to mean anything at all.
 UNIFORMITY_GATE = 0.50
+
+# The guard that actually catches the reported bug: how much of the visible backdrop the ratio map is
+# allowed to modulate.
+#
+# A man photographed against a near-white wall produced a *correct* silhouette from remove.bg, yet
+# the delivered asset showed the original wall — so it read as "background removal is not working".
+# It was working. The wall carried panel seams, a luminance gradient and a dark tree in one corner;
+# uniformity scored 0.6643 and passed the gate, but the plate estimator fits a **quadratic surface**
+# and cannot represent any of that structure. So the residual was not shadow, it was the wall — and
+# `flatten` multiplied it back onto the replacement colour, faithfully repainting the backdrop.
+#
+# Uniformity scores the plate *fit*. This scores the *residual*, which is the thing that gets
+# painted, and it separates the cases far more cleanly:
+#
+#     synthetic studio sweep, real cast shadow   modulates 11.3% of the backdrop
+#     man photographed against a panelled wall   modulates 75.4% of the backdrop
+#
+# A cast shadow is *local* — it sits near the product's contact point. Scene texture mistaken for
+# shadow is *global*. A map darkening most of the frame is asserting "the entire backdrop is in
+# shadow", which is not a shadow but a copy of the backdrop.
+#
+# The failure is asymmetric, so this errs toward refusing: a *missed* shadow gives a flat background
+# and says so via SHADOW_GATE_FAILED, which is mildly disappointing. A *false* shadow reproduces the
+# whole original backdrop and looks exactly like the core feature is broken.
+_MAX_SHADOW_COVERAGE = 0.35
 
 # Ratio values within this of 1.0 are snapped to exactly 1.0. Without a deadband, sensor noise in
 # the clean backdrop would modulate the replacement colour and add visible grain to what is
@@ -222,6 +262,16 @@ def extract_shadow_ratio(
 
     if bool(np.all(ratio == 1.0)):
         return None                            # nothing was there; no point carrying a no-op map
+
+    # Coverage guard — see `_MAX_SHADOW_COVERAGE`. Checked on the *visible backdrop only*: the
+    # product's own footprint was pinned to 1.0 above, so including it would dilute the measure by
+    # however much of the frame the product happens to occupy, making the threshold depend on
+    # framing rather than on whether this is a shadow.
+    visible = a <= _BG_ALPHA_MAX
+    if visible.any():
+        coverage = float((np.abs(ratio - 1.0) > _RATIO_DEADBAND)[visible].mean())
+        if coverage > _MAX_SHADOW_COVERAGE:
+            return None
 
     return ratio.astype(np.float32)
 

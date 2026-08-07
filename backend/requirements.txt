@@ -11,9 +11,26 @@ numpy==1.26.4                     # all pixel maths; every imaging stage is floa
 opencv-python-headless==4.10.0.84 # contours for centring, morphology for the edge band
                                   # headless: no libGL on a server. Do NOT swap for opencv-python
 Pillow==10.4.0                    # decode/encode, EXIF, ICC read+write via ImageCms (littleCMS)
+rawpy==0.27.0                     # DECODING camera raw (CR2/CR3/NEF/CRW/DNG/.raw) via libraw.
+                                  # Decode only — libraw ships no encoder and none exists, which
+                                  # is why raw inputs are delivered as 16-bit TIFF. See
+                                  # app/imaging/formats.py. Needs libraw at the system level;
+                                  # the manylinux wheel bundles it.
+tifffile==2026.3.3                # WRITING true 16-bit RGB TIFF. Pillow cannot: its RGB mode is
+                                  # 8-bit and fromarray(uint16, mode="RGB") silently writes a
+                                  # scrambled 8-bit file rather than raising. Was already present
+                                  # as a psd-tools dependency; pinned here now that we import it
+                                  # directly. Use compression="zlib" — its LZW needs imagecodecs.
 
 # --- PSD ---
 psd-tools==1.9.31                 # READING PSDs for the output validator. Not a writer
+pytoshop==1.2.1                   # WRITING the layered PSD when Adobe is unavailable, which is
+                                  # every deployment today — Firefly is enterprise-quoted, so this
+                                  # is the only path that actually ships a PSD. Previously left
+                                  # unpinned/uninstalled, which made the whole PSD stage fail.
+                                  # Held at 1.2.1: app/psd/fallback.py works around two defects in
+                                  # this exact wheel (broken RLE packbits, layer-name NUL), and it
+                                  # is why numpy is held at 1.x. Builds from sdist, needs cython.
 
 # --- API ---
 fastapi==0.115.0

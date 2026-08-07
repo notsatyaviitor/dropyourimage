@@ -3,9 +3,9 @@
 #
 #   docker compose up -d
 #
-# The backend and frontend are run directly (uvicorn / vite) during the sprint so reloads are
-# instant. Their Dockerfiles exist for parity, under the `apps` profile:
-#   docker compose --profile apps up -d
+# This file provides Redis and MinIO only. The backend and frontend are run natively (uvicorn /
+# vite) so reloads are instant during the sprint — there are no Dockerfiles and no `apps` profile.
+# Containerising the apps is deliberately out of scope for the demo; see the root CLAUDE.md.
 
 services:
   redis:

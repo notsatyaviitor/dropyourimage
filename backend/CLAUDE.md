@@ -15,23 +15,28 @@ If a dependency is added, put it in `requirements.txt` with a pinned version and
 ## Module boundaries
 
 ```
-app/core/        settings (pydantic-settings), logging, errors — no domain logic
+app/core/        settings (pydantic-settings), errors, jobstore — no domain logic
 app/models.py    the frozen contract: JobConfig, JobStatus, ImageResult
 app/imaging/     PURE FUNCTIONS ONLY. No I/O, no network, no globals, no config reads
-app/engines/     segmentation adapters behind one Protocol + a registry
+app/engines/     segmentation adapters behind one Protocol + a registry, plus the cut-out cache
 app/storage/     object storage behind a Protocol (MinIO/S3 now, anything later)
 app/ingest/      safe zip extraction
 app/psd/         Photoshop API client, fallback writer, psd-tools validator
 app/pipeline.py  orchestrates the five stages in order — the ONLY place that knows the sequence
+app/jobs.py      per-job orchestration: unpack, fan out over images, bundle the results
 app/api/         FastAPI routes; thin, no imaging logic
 ```
+
+There is no `app/core/logging.py`; the app uses stdlib logging directly and `LOG_LEVEL` is not yet
+wired to anything.
 
 **`app/imaging/` is pure.** Every function takes arrays plus a config object and returns arrays. No file
 reads, no HTTP, no clock, no randomness. This is what makes the core testable offline with exact assertions,
 and it is the most important boundary in the codebase — do not put a vendor call or a file read in there.
 
-Use `typing.Protocol` for `BackgroundRemover`, `StorageBackend` and `PsdBuilder`. Adding an engine should be one
-new file in `app/engines/` plus one registry line — nothing else changes.
+Use `typing.Protocol` for `BackgroundRemover`, `StorageBackend` and `CutoutCache`. Adding an engine should be one
+new file in `app/engines/` plus one registry line — nothing else changes. (PSD has no `PsdBuilder` Protocol: it
+has a single entry point, `app/psd/service.py::produce_psd`, which picks the Adobe path or the fallback.)
 
 ## Imaging invariants — each of these is a bug if broken
 
@@ -83,8 +88,13 @@ turning out to be neither.
 
 ## Cost discipline
 
-Cache cut-out results on `sha256(image_bytes) + engine_id`. Segmentation is deterministic per engine, so
-re-running while tuning colour or geometry must cost nothing. Log per-job spend to the cost ledger.
+Cut-outs are cached on `sha256(image_bytes) + engine_id` — `app/engines/cache.py`, keyed by
+`pipeline.cache_key()`. Segmentation is deterministic per engine, so re-running while tuning colour or geometry
+costs nothing. Two rules for that module: alpha is stored as **lossless float32**, never an 8-bit PNG (8 bits
+erodes soft edges a little more on every round trip, which is invariant 2), and a broken cache must degrade to a
+miss rather than fail the image — a cache is an optimisation, so it may cost money but never correctness.
+
+Per-job spend accumulates into `JobStatus.cost_usd`. There is no separate cost-ledger store yet.
 
 ## Style
 

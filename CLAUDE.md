@@ -27,9 +27,19 @@ The client's own report says the same: *"Sending this work to a vision model wou
 
 Legitimate AI uses in this codebase, and the complete list of them:
 - Background removal / segmentation (stage 1) — commercial APIs, dual-engine
-- The auto-pick **tie-break** when deterministic scoring cannot separate two candidate cut-outs (Gemini 3 Flash)
+- The auto-pick **tie-break** when deterministic scoring cannot separate two candidate cut-outs
+  (`gemini-3.5-flash`; comparisons are counterbalanced because position bias was measured)
+- **Subject localisation** from a text prompt, when a photograph contains several objects
+  (`app/engines/locate.py`). Background removal separates foreground from background and structurally
+  cannot say *which* foreground you meant; on a furnished-room shot it returned a clean mask of the
+  sofa when the coffee table was wanted. The model returns one bounding box — semantics, i.e.
+  judgement. The box is then padded and cropped by deterministic code, and the mask still comes from
+  the segmentation engine at full precision. No model touches output pixels.
 - Optional AI upscale when the requested canvas exceeds the master resolution
 - Optional per-output QC score (a buy-back option, not built by default)
+
+Note what each of these has in common: the model supplies a *decision* — which engine, which object —
+never a pixel. If a proposed AI use would produce or alter output pixels, it is not on this list.
 
 ## Constraints
 
@@ -43,11 +53,14 @@ Legitimate AI uses in this codebase, and the complete list of them:
 ## Structure — two independent projects
 
 ```
-backend/     Python · FastAPI · own .venv + requirements + Dockerfile
-frontend/    TypeScript · React · own package.json + Dockerfile
+backend/     Python · FastAPI · own .venv + requirements
+frontend/    TypeScript · React · own package.json
 data/        real test photos — GITIGNORED, never committed
 docs/        shared reference; docs/API_CONTRACT.md is the only coupling
 ```
+
+Neither project has a Dockerfile — both run natively during the sprint, and `docker-compose.yml`
+provides only Redis and MinIO. Containerising the apps is out of scope.
 
 **Nothing in `frontend/` imports from `backend/` or vice versa.** They talk over HTTP through the contract in
 `docs/API_CONTRACT.md`, which is frozen — changing it requires updating both sides and the doc in the same

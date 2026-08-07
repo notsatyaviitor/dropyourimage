@@ -7,17 +7,26 @@ AI Enablement Report assigns Gemini 3 Flash in Feature 1: genuine judgement, not
 The model never sees the pipeline's settings and never influences colour, geometry or output —
 it returns one of two engine names, and nothing else.
 
-Measured behaviour (counterbalanced A/B on a deliberately eroded mask, see docs/ENGINES.md)
+Measured behaviour (counterbalanced A/B, 4 trials per model: 25px and 12px erosion x both
+presentation orders, run 6 Aug 2026 against a live key — see docs/ENGINES.md)
 --------------------------------------------------------------------------------------------
-* ``gemini-3-flash-preview`` — 2/2 correct in both orderings, accurate reasons, 7-32s per call.
-* ``gemini-2.5-flash`` — answered "no difference" on an obvious 25px erosion, 0/2 useful.
-* The deterministic scorer in `autopick.py` also got 2/2, at 0ms and no cost.
+* ``gemini-3.5-flash`` — **3/4**. Correct in both orders at 25px; missed the 12px case one way.
+* ``gemini-3.6-flash`` — 2/4. Order-independent, but missed the subtler 12px erosion both ways.
+* ``gemini-3-flash-preview`` — 2/4, and **the 2 are an artefact**: it chose whichever mask was
+  shown first in all 4 trials. That is pure position bias, not partial competence.
+* ``gemini-2.5-flash`` — answered "no difference" on an obvious 25px erosion.
+* The deterministic scorer in `autopick.py` gets these right at 0 ms and no cost.
 
-Two consequences. First, ``GEMINI_MODEL`` defaults to the preview, because it is the only id that
-works — the client report's ``gemini-3-flash`` does not exist in the API at all, and the stable
-2.5-flash cannot do the task. A preview dependency is a real risk to flag, not to hide. Second,
-the tie-break is genuinely optional: it fires only on near-ties, carries a short timeout, and
-degrades to the deterministic answer rather than delaying a batch.
+Three consequences, all load-bearing:
+
+1. ``GEMINI_MODEL`` defaults to ``gemini-3.5-flash``: best measured, and *stable* rather than a
+   preview. The client report's ``gemini-3-flash`` does not exist in the API at all.
+2. **Comparisons are counterbalanced** — see `pick`. Position bias was measurable, so a single call
+   cannot be trusted; a winner is returned only when both orderings agree.
+3. The tie-break stays genuinely optional. Even the best model here is 3/4 on a deliberately
+   obvious defect, so it is advisory: it fires only on near-ties, where the deterministic scorer
+   has already established the two masks are close to equivalent, and it degrades to that answer on
+   any disagreement, timeout or error. It must never be presented as a quality measurement.
 """
 
 from __future__ import annotations
@@ -97,6 +106,16 @@ class GeminiTiebreak:
         `candidates` is exactly two ``(engine, alpha)`` pairs. Raises `TiebreakUnavailable` on any
         problem — a tie-break failing must never fail the image, since a deterministic answer
         already exists.
+
+        **The comparison is counterbalanced.** The same pair is judged twice, once in each
+        presentation order, and a winner is only returned when both runs name the same engine.
+        This is not belt-and-braces: position bias was *measured* here, and it was the dominant
+        failure mode. On a 25px erosion, `gemini-3-flash-preview` picked whichever mask was shown
+        first in 4/4 trials — 2/4 overall accuracy that looks like partial competence but is
+        actually no signal at all. Disagreement across orderings is exactly that condition, and it
+        degrades to the deterministic score instead of laundering a coin flip as judgement.
+
+        Cost is two calls per tie-break. Tie-breaks fire only on near-ties, so this is rare.
         """
         if not self.available():
             raise TiebreakUnavailable("no GEMINI_API_KEY configured")
@@ -105,15 +124,45 @@ class GeminiTiebreak:
 
         previews = [self._review_preview(rgb_linear, alpha) for _, alpha in candidates]
 
+        import asyncio
+
+        forward, reverse = await asyncio.gather(
+            self._judge(previews[0], previews[1]),
+            self._judge(previews[1], previews[0]),
+            return_exceptions=True,
+        )
+
+        if isinstance(forward, BaseException) or isinstance(reverse, BaseException):
+            raise TiebreakUnavailable("one or both vision calls failed")
+
+        fwd_better, fwd_reason = forward
+        rev_better, _ = reverse
+
+        if fwd_better == "equivalent" or rev_better == "equivalent":
+            raise TiebreakUnavailable("model saw no reliable difference")
+
+        # Map each verdict back to an index into `candidates`. The reverse call saw them swapped.
+        fwd_idx = 0 if fwd_better == "A" else 1
+        rev_idx = 1 if rev_better == "A" else 0
+
+        if fwd_idx != rev_idx:
+            raise TiebreakUnavailable(
+                "verdict flipped when the order was reversed — position bias, not judgement"
+            )
+
+        return candidates[fwd_idx][0], fwd_reason
+
+    async def _judge(self, preview_a: str, preview_b: str) -> tuple[str, str]:
+        """One comparison call. Returns ``(better, reason)`` where better is A | B | equivalent."""
         payload = {
             "contents": [
                 {
                     "parts": [
                         {"text": _PROMPT},
                         {"text": "Cut-out A:"},
-                        {"inline_data": {"mime_type": "image/png", "data": previews[0]}},
+                        {"inline_data": {"mime_type": "image/png", "data": preview_a}},
                         {"text": "Cut-out B:"},
-                        {"inline_data": {"mime_type": "image/png", "data": previews[1]}},
+                        {"inline_data": {"mime_type": "image/png", "data": preview_b}},
                     ]
                 }
             ],
@@ -144,14 +193,7 @@ class GeminiTiebreak:
         verdict = _parse_verdict(response.json())
         if verdict is None:
             raise TiebreakUnavailable("vision response was not usable")
-
-        better, reason = verdict
-        if better == "equivalent":
-            # An honest "cannot tell" is more useful than a coin flip. Fall back to the
-            # deterministic score rather than inventing a preference.
-            raise TiebreakUnavailable(f"model saw no difference: {reason}")
-
-        return candidates[0 if better == "A" else 1][0], reason
+        return verdict
 
     @staticmethod
     def _review_preview(rgb_linear: np.ndarray, alpha: np.ndarray) -> str:

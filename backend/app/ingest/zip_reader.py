@@ -30,6 +30,27 @@ from app.core.settings import Settings
 # Content types we will attempt to decode. Sniffed from bytes, never from the filename.
 _ALLOWED_MIME_PREFIXES = ("image/",)
 
+# Exact types that are legitimate input but do not sniff as `image/*`.
+#
+# Camera raw is the awkward case. Some raws are TIFF containers and sniff as `image/tiff`, but
+# CR3 is ISO-BMFF and libmagic commonly reports it as `video/quicktime` or a generic binary, while
+# CRW and some .raw dumps have no signature libmagic knows at all. EPS is PostScript, so it is
+# `application/postscript` by definition and never `image/*`.
+#
+# **This does not re-trust the extension.** An entry only gets through this path when its sniffed
+# type is in the narrow list below AND its extension names a raw/EPS format we can actually decode
+# — the extension narrows an already-allowed content type, it never promotes a disallowed one. The
+# decoder is still the final arbiter, and a mislabelled file fails there as `image_decode_failed`.
+_EXTENSION_GATED_MIMES = frozenset(
+    {
+        "application/postscript",   # EPS
+        "application/octet-stream", # CRW, .raw, some CR3
+        "video/quicktime",          # CR3 (ISO-BMFF, shares a container family with MOV)
+        "video/mp4",                # CR3 under a different libmagic build
+        "application/x-empty",      # zero-length; rejected by the decoder with a clear message
+    }
+)
+
 # Sniffed types that are images but that we do not process, listed explicitly so the rejection
 # message can be specific rather than "unsupported".
 _KNOWN_UNSUPPORTED = {
@@ -131,7 +152,7 @@ def read_images(data: bytes, settings: Settings) -> tuple[list[ZipEntry], list[Z
         if mime in _KNOWN_UNSUPPORTED:
             rejections.append(ZipRejection(display, _KNOWN_UNSUPPORTED[mime]))
             continue
-        if not mime.startswith(_ALLOWED_MIME_PREFIXES):
+        if not mime.startswith(_ALLOWED_MIME_PREFIXES) and not _extension_gated(display, mime):
             rejections.append(
                 ZipRejection(display, f"Not an image file (detected {mime}).")
             )
@@ -143,6 +164,23 @@ def read_images(data: bytes, settings: Settings) -> tuple[list[ZipEntry], list[Z
         raise errors.MaliciousArchive("The archive contains no files.")
 
     return entries, rejections
+
+
+def _extension_gated(name: str, mime: str) -> bool:
+    """Whether a non-`image/*` entry is a raw or EPS file we can decode.
+
+    Both halves must agree: the sniffed type has to be one of the few that camera raw and EPS
+    legitimately produce, *and* the extension has to name a format in the decoder's table. Either
+    alone is not enough, so this cannot be used to smuggle an arbitrary binary through — the worst
+    a mislabelled file achieves is reaching the decoder and failing there.
+    """
+    if mime not in _EXTENSION_GATED_MIMES:
+        return False
+
+    from app.imaging import formats as F
+
+    source = F.source_from_name(name)
+    return source is not None and (F.is_raw(source) or source.value == "eps")
 
 
 def _is_ignorable(info: zipfile.ZipInfo) -> bool:

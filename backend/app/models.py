@@ -47,6 +47,7 @@ class EngineId(str, Enum):
     PHOTOROOM = "photoroom"
     REMOVEBG = "removebg"
     FALAI = "falai"
+    GEMINI = "gemini"
     LOCAL = "local"
 
 
@@ -94,11 +95,44 @@ class ShadowMode(str, Enum):
 
 
 class OutputFormat(str, Enum):
+    """Formats this pipeline can **write**. Strictly smaller than what it can read.
+
+    Camera raw is absent and always will be — see `app/imaging/formats.py` for why that is a
+    property of the format rather than a missing library.
+    """
+
     PNG = "png"
     JPEG = "jpeg"
     TIFF = "tiff"
     WEBP = "webp"
+    BMP = "bmp"
+    EPS = "eps"
     PSD = "psd"
+
+
+class SourceFormat(str, Enum):
+    """Formats this pipeline can **read**.
+
+    Everything here decodes. Only the subset in `formats.SOURCE_TO_OUTPUT` can also be written, so
+    a raw source delivered under `export.match_source` comes back as 16-bit TIFF carrying
+    `Note.FORMAT_SUBSTITUTED`.
+    """
+
+    PNG = "png"
+    JPEG = "jpeg"
+    BMP = "bmp"
+    TIFF = "tiff"
+    WEBP = "webp"
+    EPS = "eps"
+    PSD = "psd"
+
+    # --- camera raw: decode-only ---
+    CRW = "crw"
+    CR2 = "cr2"
+    CR3 = "cr3"
+    DNG = "dng"
+    NEF = "nef"
+    RAW = "raw"
 
 
 class ColorProfile(str, Enum):
@@ -136,8 +170,11 @@ class ErrorCode(str, Enum):
     VENDOR_ERROR = "vendor_error"
     VENDOR_TIMEOUT = "vendor_timeout"
     VENDOR_UNAUTHORIZED = "vendor_unauthorized"     # missing or rejected key
+    VENDOR_OUT_OF_CREDITS = "vendor_out_of_credits"  # key is valid, the account needs topping up
+    NO_FOREGROUND_FOUND = "no_foreground_found"      # engine saw nothing to cut out
     UNSUPPORTED_FILE = "unsupported_file"
     FILE_TOO_LARGE = "file_too_large"
+    OUTPUT_TOO_LARGE = "output_too_large"           # requested canvas beyond the pixel budget
     MALICIOUS_ARCHIVE = "malicious_archive"         # zip-slip / bomb guard tripped
     IMAGE_DECODE_FAILED = "image_decode_failed"
     PSD_UNAVAILABLE = "psd_unavailable"             # Adobe creds absent; see docs/PSD.md
@@ -169,8 +206,73 @@ class Note(str, Enum):
     TIEBREAK_DETERMINISTIC = "tiebreak_deterministic"
     """Candidates scored equal and no Gemini key was set; picked by deterministic score alone."""
 
+    TIEBREAK_VISION = "tiebreak_vision"
+    """Candidates scored equal and a vision model chose between them.
+
+    Distinct from TIEBREAK_DETERMINISTIC on purpose: this outcome is a model's *judgement*, not a
+    measurement, and the UI must not present it as one. It is also the only note whose cause is
+    non-deterministic, so two runs of the same job can legitimately differ here.
+    """
+
     ALPHA_SUSPECT = "alpha_suspect"
     """Cut-out passed the reject rules but scored poorly. Worth a human look."""
+
+    SUBJECT_LOCATED = "subject_located"
+    """A text prompt isolated one object before segmenting; only that region was cut out."""
+
+    SUBJECT_NOT_FOUND = "subject_not_found"
+    """A subject prompt was given but the object could not be located.
+
+    The image was segmented whole-frame instead, which on a multi-object scene very likely cut out
+    the wrong thing. This is the note that must never be swallowed.
+    """
+
+    BUSY_SCENE = "busy_scene"
+    """The original background is not a uniform studio backdrop.
+
+    Every downstream assumption here is built for a packshot. On a furnished-room photograph the
+    cut-out may be of the wrong object entirely, and shadow reconstruction is skipped. Emitted
+    alongside a low alpha score so the UI can warn rather than deliver silently.
+    """
+
+    MULTI_OBJECT = "multi_object"
+    """The scene was split into one PSD layer per object rather than a single cut-out.
+
+    A model enumerated the objects and each was segmented separately, so the PSD carries a named
+    layer and saved path per object. Costs one segmentation call *per object*, and the object list
+    is a model's judgement about what counts as a thing — both facts the UI must surface.
+
+    `ImageResult.layers` names what was found.
+    """
+
+    FORMAT_SUBSTITUTED = "format_substituted"
+    """`match_source` was asked for, but the source format could not be delivered. Two causes:
+
+    * **Camera raw** (CRW/CR2/CR3/DNG/NEF/RAW) is decode-only — undemosaiced sensor data, with no
+      encoder in any library. Delivered as 16-bit TIFF, matching what Lightroom and Capture One
+      export a processed raw as.
+    * **A transparent job on a JPEG, BMP or EPS source.** None of those carry an alpha channel,
+      so returning the source format would silently drop the transparency that was asked for.
+      Delivered as PNG instead.
+
+    `ImageResult.source_format` says what arrived, so the UI can name both sides of the swap.
+    """
+
+    HARD_EDGED_MASK = "hard_edged_mask"
+    """The chosen engine returned a hard boundary, not a coverage field. No soft alpha exists.
+
+    Emitted for `EngineId.GEMINI`, whose API returns the mask as a polygon rather than a matte.
+    Measured on the studio fixture: 2 distinct alpha values and 0 soft edge pixels, against 27 for
+    ground truth. Two consequences the UI must not hide:
+
+    * Edge quality is permanently lower — `backend/CLAUDE.md` invariant 2 exists because a
+      thresholded alpha cannot be recovered later.
+    * `decontaminate_edges` has no partially-transparent band to work on, so a white studio
+      backdrop can leave a halo when composited onto a saturated colour.
+
+    This is a property of the engine the operator chose, not a failure, so the image still
+    delivers. It is the note that makes an accepted trade-off visible instead of silent.
+    """
 
     PSD_FALLBACK_RASTER = "psd_fallback_raster"
     """PSD written without a vector clipping path — layers and mask only."""
@@ -199,12 +301,48 @@ class CutoutSpec(StrictModel):
             "calls — both engines already ran."
         ),
     )
+    multi_object: bool = Field(
+        default=False,
+        description=(
+            "Split a SCENE into one PSD layer per object instead of producing a single cut-out. "
+            "A model enumerates the objects and each is segmented separately, so the PSD carries "
+            "a named layer and saved path per object. Costs one segmentation call PER OBJECT. "
+            "Skips centring, shadow reconstruction and background replacement, none of which are "
+            "meaningful for a room. For a packshot, leave this off."
+        ),
+    )
+    subject_prompt: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Which object to extract, in plain words — e.g. 'coffee table'. Needed only for "
+            "scenes containing several objects: background removal answers foreground vs "
+            "background and cannot tell which foreground you meant. Null means whole-frame "
+            "segmentation, which is correct for a packshot."
+        ),
+    )
+    subject_padding_pct: Annotated[float, Field(ge=0, le=50)] = Field(
+        default=6.0,
+        description=(
+            "Context kept around the located object before segmenting, as a percentage of the "
+            "box's own size. A box cropped flush to the object gives the engine no surround to "
+            "place the edge against."
+        ),
+    )
 
     @model_validator(mode="after")
     def _engine_required_for_single(self) -> CutoutSpec:
         if self.strategy is EngineStrategy.SINGLE and self.engine is None:
             raise ValueError("cutout.engine is required when strategy is 'single'")
         return self
+
+    @field_validator("subject_prompt")
+    @classmethod
+    def _blank_prompt_is_none(cls, v: str | None) -> str | None:
+        """An empty or whitespace-only box in the UI means "no prompt", not "find nothing"."""
+        if v is None:
+            return None
+        return v.strip() or None
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +474,15 @@ class PsdSpec(StrictModel):
 
 class ExportSpec(StrictModel):
     formats: list[OutputFormat] = Field(default_factory=lambda: [OutputFormat.PNG])
+    match_source: bool = Field(
+        default=True,
+        description=(
+            "Also deliver each image in the format it arrived as. A PNG in yields a PNG out, a "
+            "TIFF a TIFF, and so on. Camera raw cannot be written, so those deliver 16-bit TIFF "
+            "and carry Note.FORMAT_SUBSTITUTED. `formats` is still honoured on top of this, so "
+            "the delivered set is the union — set this false for a fixed format for every image."
+        ),
+    )
     profile: ColorProfile = ColorProfile.SRGB
     jpeg_quality: Annotated[int, Field(ge=1, le=100)] = 92
     webp_quality: Annotated[int, Field(ge=1, le=100)] = 90
@@ -461,6 +608,26 @@ class ImageResult(StrictModel):
         description="0-1; drives the shadow gate. Low means a busy original background.",
     )
     source_size: tuple[int, int] | None = None
+    preview_format: OutputFormat | None = Field(
+        default=None,
+        description=(
+            "An extra output produced ONLY so the UI has something to display, set when no "
+            "requested format is viewable in a browser (TIFF, EPS and PSD are not). It is a real "
+            "asset in `outputs` but was not asked for, so it is excluded from the download "
+            "bundle. None whenever a delivered format is already viewable."
+        ),
+    )
+    layers: list[str] = Field(
+        default_factory=list,
+        description="Named object layers in the PSD, largest first. Only set for multi_object.",
+    )
+    source_format: SourceFormat | None = Field(
+        default=None,
+        description=(
+            "The format this image arrived as. Paired with Note.FORMAT_SUBSTITUTED it tells the "
+            "UI both halves of a swap — 'you sent CR2, we delivered TIFF'."
+        ),
+    )
 
     cost_usd: float = 0.0
     duration_ms: int | None = None

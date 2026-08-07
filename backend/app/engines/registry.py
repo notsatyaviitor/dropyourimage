@@ -9,14 +9,19 @@ from __future__ import annotations
 
 from app.core.settings import Settings
 from app.engines.base import BackgroundRemover
+from app.engines.gemini_segment import GeminiSegmentEngine
 from app.engines.http import FalAiEngine, PhotoroomEngine, RemoveBgEngine
 from app.engines.local import LocalEngine
 from app.models import CutoutSpec, EngineId, EngineStrategy
 
+# Every engine that can be *named*. Which of them AUTO will actually pair up is a separate
+# question, answered by `ENGINE_POOL` — `gemini` is constructible here but absent there on
+# purpose, so it is selectable without ever being auto-picked. See settings.engine_pool.
 _CONSTRUCTORS = {
     EngineId.PHOTOROOM: PhotoroomEngine,
     EngineId.REMOVEBG: RemoveBgEngine,
     EngineId.FALAI: FalAiEngine,
+    EngineId.GEMINI: GeminiSegmentEngine,
 }
 
 # How many engines the AUTO strategy runs concurrently. Two is where the yield gain is; a third

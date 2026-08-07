@@ -177,3 +177,111 @@ class TestDeterminism:
         second = S.extract(observed, alpha)
         assert np.array_equal(first.ratio, second.ratio)
         assert first.plate.uniformity == second.plate.uniformity
+
+
+def panelled_wall_scene(size: int = 300):
+    """A subject against a mildly textured wall — the case that produced a real, reported bug.
+
+    Reproduces the structure of the photograph that broke this: a near-white wall carrying panel
+    seams and a luminance gradient. It is uniform *enough* to score well above the old 0.50 gate,
+    but its structure is not representable by the plate estimator's quadratic surface, so the
+    residual is scene texture rather than shadow.
+
+    Returns ``(observed, alpha)``.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+
+    # Bright wall with a gentle gradient — a quadratic *can* fit this part.
+    wall = 0.90 - 0.07 * (yy / size)
+    # Panel seams: narrow dark bands a quadratic cannot represent at all.
+    seam = np.exp(-(((xx % (size / 3.0)) - 4.0) / 2.2) ** 2)
+    wall = wall - 0.16 * seam
+    # A dark object intruding into one corner, as the tree did in the real photograph.
+    corner = np.exp(-(((xx - size * 0.93) / (size * 0.09)) ** 2 + ((yy - size * 0.06) / (size * 0.07)) ** 2))
+    wall = wall - 0.55 * corner
+
+    backdrop = np.dstack([C.srgb_decode(np.clip(wall, 0, 1).astype(np.float32))] * 3)
+
+    dist = np.sqrt(((xx - size / 2) / 1.05) ** 2 + ((yy - size * 0.62) / 1.5) ** 2)
+    alpha = np.clip(size * 0.30 - dist + 0.5, 0.0, 1.0).astype(np.float32)
+    subject = np.full((size, size, 3), C.srgb_decode(np.float32(0.22)), dtype=np.float32)
+
+    return X.composite_over(subject, alpha, backdrop), alpha
+
+
+class TestShadowGateRegression:
+    """A real photograph broke this, and the symptom was misleading.
+
+    A man was photographed against a panelled white wall. remove.bg returned a *correct* silhouette,
+    yet the delivered asset showed the original wall — so it read as "background removal is not
+    working". It was working: the background was replaced, and then the shadow stage repainted the
+    wall on top of it, because it had measured the wall's own structure as shadow.
+
+    Two guards now stand between that and a delivered asset. Both are pinned here.
+    """
+
+    def test_a_real_cast_shadow_is_still_preserved(self):
+        """The guards must not cost us the feature they protect."""
+        observed, alpha, _ = studio_scene(size=300)
+        plate = S.estimate_background_plate(observed, alpha)
+        ratio = S.extract_shadow_ratio(observed, alpha, plate)
+
+        assert plate.uniformity > S.UNIFORMITY_GATE, plate.uniformity
+        assert ratio is not None, "a genuine cast shadow on a studio sweep must survive"
+        assert float(ratio.min()) < 0.95, "and it must actually darken something"
+
+    def test_a_textured_wall_is_refused(self):
+        observed, alpha = panelled_wall_scene(size=300)
+        plate = S.estimate_background_plate(observed, alpha)
+        ratio = S.extract_shadow_ratio(observed, alpha, plate)
+
+        assert ratio is None, (
+            f"a wall with seams must not be treated as shadow (uniformity {plate.uniformity:.4f})"
+        )
+
+    def test_the_uniformity_gate_alone_would_have_let_it_through(self):
+        """Pins that the coverage guard is the load-bearing one, not the uniformity gate.
+
+        This fixture scores *high* uniformity — the wall is bright and mostly smooth, so the
+        quadratic plate fits it well on average. The gate cannot see the seams. Only measuring the
+        residual catches them. If someone ever "simplifies" this back to a uniformity threshold, this
+        test says why that does not work.
+        """
+        observed, alpha = panelled_wall_scene(size=300)
+        plate = S.estimate_background_plate(observed, alpha)
+        assert plate.uniformity >= S.UNIFORMITY_GATE, (
+            f"fixture no longer reproduces the bug — uniformity {plate.uniformity:.4f} is already "
+            "below the gate, so it would be refused anyway and proves nothing about coverage"
+        )
+
+    def test_a_shadow_covering_most_of_the_backdrop_is_refused(self):
+        """The coverage guard, isolated from the uniformity gate.
+
+        A cast shadow is local; measured 11.3% of the backdrop on the studio fixture versus 75.4% on
+        the real photograph. A map that darkens nearly everything is a copy of the backdrop.
+        """
+        size = 200
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+        # A perfectly flat backdrop (uniformity will be high) dimmed almost everywhere, so only the
+        # coverage guard can catch it.
+        flat = np.full((size, size), C.srgb_decode(np.float32(0.95)), dtype=np.float32)
+        backdrop = np.dstack([flat] * 3)
+        wide = np.where(yy > size * 0.1, 0.6, 1.0).astype(np.float32)
+
+        dist = np.sqrt((xx - size / 2) ** 2 + (yy - size / 2) ** 2)
+        alpha = np.clip(size * 0.12 - dist + 0.5, 0.0, 1.0).astype(np.float32)
+        product = np.zeros((size, size, 3), dtype=np.float32)
+        observed = X.composite_over(product, alpha, backdrop * wide[..., None])
+
+        plate = S.estimate_background_plate(observed, alpha)
+        ratio = S.extract_shadow_ratio(observed, alpha, plate)
+        assert ratio is None, "a map darkening ~90% of the backdrop is not a shadow"
+
+    def test_the_thresholds_stay_where_the_measurements_put_them(self):
+        """Both were tuned against real data; a silent change should fail loudly here."""
+        assert S._MAX_SHADOW_COVERAGE == 0.35, "measured: studio 11.3% vs wall 75.4%"
+        assert S.UNIFORMITY_GATE == 0.50, (
+            "deliberately NOT raised — see the comment in shadow.py. There is no measurement of "
+            "what a real studio photograph scores, so raising it on one data point risks disabling "
+            "the feature on exactly the images it exists for."
+        )

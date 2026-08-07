@@ -36,6 +36,20 @@ def _clean_name(name: str) -> str:
     return name.rstrip('\x00')
 
 
+def _mode_name(color_mode: object) -> str:
+    """Readable name for psd-tools' `ColorMode`, across Python versions.
+
+    `ColorMode` is an `IntEnum`, and **Python 3.11 changed `IntEnum.__str__` to return the bare
+    number** — `str(ColorMode.RGB)` was "ColorMode.RGB" on 3.10 and is "3" on 3.11+. An earlier
+    version of this file tested `'RGB' not in str(psd.color_mode)`, which silently began marking
+    every correctly-written RGB PSD as invalid the moment the interpreter moved on. The two PSD
+    suites were skipped for a missing `pytoshop`, so nothing caught it.
+
+    `.name` is stable on every version, so prefer it and fall back to `str` only for a plain int.
+    """
+    return getattr(color_mode, "name", None) or str(color_mode)
+
+
 def validate_psd(data: bytes, spec: PsdSpec, *, expected_size: tuple[int, int] | None = None) -> PsdValidation:
     """Structural validation of a written PSD against the naming/profile/path it was asked for.
 
@@ -50,9 +64,10 @@ def validate_psd(data: bytes, spec: PsdSpec, *, expected_size: tuple[int, int] |
     except Exception as exc:
         return PsdValidation(ok=False, problems=[f"could not open PSD: {exc}"])
 
+    mode = _mode_name(psd.color_mode)
     result = PsdValidation(
         ok=True,
-        color_mode=str(psd.color_mode),
+        color_mode=mode,
         depth=psd.depth,
         width=psd.width,
         height=psd.height,
@@ -61,8 +76,8 @@ def validate_psd(data: bytes, spec: PsdSpec, *, expected_size: tuple[int, int] |
     if expected_size is not None and (psd.width, psd.height) != expected_size:
         problems.append(f"canvas is {psd.width}x{psd.height}, expected {expected_size}")
 
-    if 'RGB' not in str(psd.color_mode):
-        problems.append(f"colour mode is {psd.color_mode}, expected RGB")
+    if mode != "RGB":
+        problems.append(f"colour mode is {mode}, expected RGB")
     if psd.depth != 8:
         problems.append(f"bit depth is {psd.depth}, expected 8")
 

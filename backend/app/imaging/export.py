@@ -19,7 +19,7 @@ from PIL import Image, ImageCms, ImageOps
 
 from app.imaging import color as C
 from app.imaging import icc
-from app.models import ColorProfile, Note, OutputFormat
+from app.models import ColorProfile, Note, OutputFormat, SourceFormat
 
 # Pillow's own decompression-bomb guard. Overridden per-call from settings; this is the ceiling.
 Image.MAX_IMAGE_PIXELS = 80_000_000
@@ -29,7 +29,13 @@ _PIL_FORMAT = {
     OutputFormat.JPEG: "JPEG",
     OutputFormat.TIFF: "TIFF",
     OutputFormat.WEBP: "WEBP",
+    OutputFormat.BMP: "BMP",
+    OutputFormat.EPS: "EPS",
 }
+
+# Formats with no alpha channel at all. Handing them RGBA silently drops the mask, so the encoder
+# refuses instead — the same reasoning the JPEG guard below already uses.
+_NO_ALPHA_FORMATS = frozenset({OutputFormat.JPEG, OutputFormat.BMP, OutputFormat.EPS})
 
 
 @dataclass
@@ -52,19 +58,30 @@ class UnsupportedImageError(ValueError):
     """The bytes are not a usable image. Maps to `ErrorCode.IMAGE_DECODE_FAILED`."""
 
 
-def decode(data: bytes, *, max_pixels: int | None = None) -> DecodedImage:
+def decode(
+    data: bytes, *, max_pixels: int | None = None, source: SourceFormat | None = None
+) -> DecodedImage:
     """Decode arbitrary image bytes to linear-light sRGB.
 
     Handles, in order:
 
+    * **Camera raw** — routed to libraw when `source` says so, since Pillow cannot read it.
     * **EXIF orientation** — applied, so a phone shot is not silently sideways. Every downstream
       measurement (bounds, centring) would otherwise be computed on a rotated frame.
     * **Embedded ICC profiles** — converted to sRGB rather than ignored. A file tagged Adobe RGB
       whose numbers are read as sRGB comes out visibly desaturated.
-    * **CMYK, greyscale, palette, 16-bit** — normalised to 8-bit RGB(A).
+    * **CMYK, greyscale, palette, 16-bit** — normalised to RGB(A).
+
+    `source` is a hint from the filename. It only selects the *decoder*; it is never trusted as
+    proof of content, which the zip reader sniffs separately (docs/SECURITY.md).
     """
     if max_pixels is not None:
         Image.MAX_IMAGE_PIXELS = max_pixels
+
+    from app.imaging import formats as F
+
+    if source is not None and F.is_raw(source):
+        return _decode_raw(data, source, max_pixels)
 
     try:
         img = Image.open(io.BytesIO(data))
@@ -109,6 +126,68 @@ def decode(data: bytes, *, max_pixels: int | None = None) -> DecodedImage:
     )
 
 
+def _decode_raw(
+    data: bytes, source: SourceFormat, max_pixels: int | None
+) -> DecodedImage:
+    """Decode camera raw via libraw, returning linear-light sRGB.
+
+    A raw file is undemosaiced sensor readout, so "decoding" it means a real rendering decision:
+    demosaic, white balance, and the camera's colour matrix. The settings below are chosen so the
+    result lands in the same space every other decoder path produces, because the rest of the
+    pipeline assumes linear-light sRGB and nothing downstream can tell where the pixels came from.
+
+    * ``output_bps=16`` — the entire reason a raw is worth accepting. Dropping to 8 here would
+      make the 16-bit TIFF we substitute for it pointless.
+    * ``gamma=(1, 1)`` and ``no_auto_bright=True`` — ask libraw for **linear** output and no
+      auto-exposure. Its default is an sRGB-gamma, auto-brightened render, which would then be
+      sRGB-decoded again below and come out wrong. Auto-brightness is also per-image, which would
+      make two shots of the same product inconsistent.
+    * ``use_camera_wb=True`` — the white balance the photographer set in-camera, rather than
+      libraw guessing. For a packshot the studio WB is deliberate and should be honoured.
+    * ``output_color=sRGB`` — the pipeline's working primaries.
+    """
+    try:
+        import rawpy
+    except ImportError as exc:  # pragma: no cover - rawpy is pinned in requirements.txt
+        raise UnsupportedImageError(
+            f"{source.value.upper()} needs the rawpy/libraw decoder, which is not installed. "
+            "Install it with `pip install -r backend/requirements.txt`."
+        ) from exc
+
+    try:
+        with rawpy.imread(io.BytesIO(data)) as raw:
+            rgb16 = raw.postprocess(
+                output_bps=16,
+                gamma=(1, 1),
+                no_auto_bright=True,
+                use_camera_wb=True,
+                output_color=rawpy.ColorSpace.sRGB,
+            )
+    except Exception as exc:
+        raise UnsupportedImageError(
+            f"could not decode {source.value.upper()} raw file: {exc}"
+        ) from exc
+
+    height, width = rgb16.shape[:2]
+    ceiling = max_pixels if max_pixels is not None else Image.MAX_IMAGE_PIXELS
+    if ceiling and width * height > ceiling:
+        # Mirror Pillow's guard: raws are routinely 40-100 MP, so this is a live limit, not
+        # theoretical. Raising the same exception type keeps the caller's handling uniform.
+        raise Image.DecompressionBombError(
+            f"raw image is {width * height} pixels, over the {ceiling} limit"
+        )
+
+    # Already linear thanks to gamma=(1, 1); only the 16-bit scale needs undoing. No srgb_decode
+    # here — applying it would darken a linear image that never had a transfer curve applied.
+    rgb_linear = (rgb16.astype(np.float32) / 65535.0).clip(0.0, 1.0)
+
+    return DecodedImage(
+        rgb_linear=rgb_linear,
+        alpha=None,  # raw sensor data has no alpha channel; there is nothing to preserve
+        source_size=(width, height),
+    )
+
+
 def _convert_to_srgb(img: Image.Image, src_profile: bytes) -> Image.Image:
     """Convert an image with an embedded profile into sRGB.
 
@@ -135,25 +214,35 @@ def encode(
     jpeg_quality: int = 92,
     webp_quality: int = 90,
     embed_profile: bool = True,
+    deep: bool = False,
 ) -> bytes:
     """Encode linear-light sRGB to file bytes in the requested format and colour profile.
 
     Conversion order matters: linear sRGB -> linear target primaries -> target transfer function
     -> 8-bit. Skipping the primaries step and just re-encoding is the "copy the hex instead of
     converting it" bug, which costs up to ~30 levels on a saturated colour.
+
+    `deep` requests 16-bit output, and is only honoured for TIFF — the one writable format here
+    that carries more than 8 bits. It exists for camera raw, which is substituted to TIFF
+    precisely so the source's extra bit depth survives (`app/imaging/formats.py`).
     """
     if fmt is OutputFormat.PSD:
         raise ValueError("PSD is written by app.psd, not by the raster encoder")
 
     target = C.get_profile(profile.value)
     lin = C.convert_linear(np.asarray(rgb_linear, dtype=np.float32), C.SRGB, target)
-    encoded8 = C.to_uint8(target.encode(lin))
+    gamma_encoded = target.encode(lin)
 
-    if fmt is OutputFormat.JPEG:
+    if deep and fmt is OutputFormat.TIFF:
+        return _encode_tiff16(gamma_encoded, profile, embed_profile)
+
+    encoded8 = C.to_uint8(gamma_encoded)
+
+    if fmt in _NO_ALPHA_FORMATS:
         if alpha is not None and float(np.asarray(alpha).min()) < 0.999:
             raise ValueError(
-                "JPEG cannot carry transparency; flatten onto a background first "
-                "(the contract rejects transparent+JPEG, so this is a pipeline bug)"
+                f"{fmt.value.upper()} cannot carry transparency; flatten onto a background "
+                "first (the contract rejects transparent+JPEG, so this is a pipeline bug)"
             )
         img = Image.fromarray(encoded8, mode="RGB")
     elif alpha is not None:
@@ -163,7 +252,8 @@ def encode(
         img = Image.fromarray(encoded8, mode="RGB")
 
     params: dict[str, object] = {}
-    if embed_profile:
+    # EPS is PostScript; Pillow's writer takes no ICC profile and would raise on the keyword.
+    if embed_profile and fmt is not OutputFormat.EPS:
         params["icc_profile"] = icc.profile_bytes(profile.value)
 
     if fmt is OutputFormat.JPEG:
@@ -179,6 +269,45 @@ def encode(
 
     buf = io.BytesIO()
     img.save(buf, format=_PIL_FORMAT[fmt], **params)
+    return buf.getvalue()
+
+
+#: TIFF tag 34675 (ICCProfile). tifffile takes raw tags rather than a Pillow-style keyword.
+_TIFF_ICC_TAG = 34675
+
+
+def _encode_tiff16(
+    gamma_encoded: np.ndarray, profile: ColorProfile, embed_profile: bool
+) -> bytes:
+    """Write a true 16-bit RGB TIFF.
+
+    **Pillow cannot do this.** Its `RGB` mode is 8-bit only, and `Image.fromarray(uint16_array,
+    mode="RGB")` does not raise — it silently reinterprets the buffer and writes an 8-bit file with
+    scrambled pixels. That was a real bug in the first version of this function, caught only by
+    reading back `BitsPerSample`, which said `(8, 8, 8)`. Pillow's 16-bit support (`I;16`) is
+    single-channel, so there is no Pillow path to 16-bit RGB at all.
+
+    `tifffile` is already in the tree as a `psd-tools` dependency and writes this correctly, with
+    the ICC profile attached as a raw tag. `zlib` rather than LZW because tifffile's LZW encoder
+    needs the optional `imagecodecs` package; zlib is built in and compresses comparably.
+
+    No alpha path: raw is the only source that asks for 16-bit and raw carries no alpha.
+    """
+    import tifffile
+
+    extratags = []
+    if embed_profile:
+        blob = icc.profile_bytes(profile.value)
+        extratags.append((_TIFF_ICC_TAG, "B", len(blob), blob, True))
+
+    buf = io.BytesIO()
+    tifffile.imwrite(
+        buf,
+        C.to_uint16(gamma_encoded),
+        photometric="rgb",
+        compression="zlib",
+        extratags=extratags,
+    )
     return buf.getvalue()
 
 

@@ -20,6 +20,7 @@ from app.core import errors
 from app.core.jobstore import JobStore
 from app.core.settings import Settings, get_settings
 from app.engines import registry
+from app.engines.cache import StorageCutoutCache
 from app.ingest import zip_reader
 from app.models import (
     ImageResult,
@@ -96,13 +97,17 @@ async def run_job_async(
     store.save(status)
 
     engines = registry.select_pool(settings, config.cutout)
+    # Shared across every image in the job and across jobs: cache entries are namespaced under
+    # `cutouts/`, not under this job id, so re-running the same zip with a different colour or
+    # canvas costs nothing. See app/engines/cache.py.
+    cutout_cache = StorageCutoutCache(storage)
     semaphore = asyncio.Semaphore(max(1, settings.worker_concurrency))
     lock = asyncio.Lock()
 
     async def handle(entry: zip_reader.ZipEntry) -> None:
         async with semaphore:
             result, outputs = await pipeline.process_image(
-                entry.data, entry.name, config, settings, engines=engines
+                entry.data, entry.name, config, settings, engines=engines, cache=cutout_cache
             )
 
         assets = []
@@ -177,6 +182,11 @@ def _finalise(
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
             for image in done:
                 for asset in image.outputs:
+                    # The browser preview exists only so the results grid has something to paint
+                    # (TIFF/EPS/PSD render as an empty card). Nobody asked for it, so shipping it
+                    # in the download would put an unrequested PNG next to every deliverable.
+                    if asset.format is image.preview_format:
+                        continue
                     stem = image.source_name.rsplit(".", 1)[0] or image.source_name
                     name = f"{stem}.{asset.format.value}"
                     try:

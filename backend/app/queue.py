@@ -2,7 +2,7 @@
 
 Only used when `Settings.redis_url` points at a real Redis instance. In memory-mode (no Redis
 configured — the default for local dev and for tests) the API runs jobs inline instead; see
-`app/api/routes/jobs.py`. That split is deliberate: it keeps `pytest` and a keyless first run free
+`app/api/routes.py`. That split is deliberate: it keeps `pytest` and a keyless first run free
 of infrastructure, while `docker compose up -d && rq worker ... dyi` gives the real async path.
 """
 

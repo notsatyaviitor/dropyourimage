@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dropyourimage — POC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=Ubuntu:wght@400;500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="poc.css">
+</head>
+<body>
+<div class="app-layout">
+
+  <!-- ══════════════════════════════════════════════════
+       SIDEBAR
+       ══════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <div class="sidebar-brand">
+      <svg class="brand-drop" viewBox="0 0 26 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M13 0C13 0 1.5 11.5 1.5 18.5C1.5 24.8 6.7 30 13 30C19.3 30 24.5 24.8 24.5 18.5C24.5 11.5 13 0 13 0Z" fill="white"/>
+      </svg>
+      <span class="brand-name">DROPYOURIMAGE</span>
+    </div>
+
+    <div class="sidebar-create">
+      <button class="btn-create-order" onclick="goToStep(1)">create order</button>
+    </div>
+
+    <nav class="sidebar-nav">
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="currentColor">
+          <rect x="1" y="1" width="7" height="7" rx="1.5" opacity=".85"/>
+          <rect x="10" y="1" width="7" height="7" rx="1.5" opacity=".85"/>
+          <rect x="1" y="10" width="7" height="7" rx="1.5" opacity=".85"/>
+          <rect x="10" y="10" width="7" height="7" rx="1.5" opacity=".85"/>
+        </svg>
+        Dashboard
+      </button>
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 2L1.5 5.5V12L9 16L16.5 12V5.5Z"/>
+          <polyline points="1.5,5.5 9,9 16.5,5.5"/>
+          <line x1="9" y1="9" x2="9" y2="16"/>
+        </svg>
+        Orders
+      </button>
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <line x1="2" y1="5" x2="16" y2="5"/>
+          <circle cx="6" cy="5" r="2.5" fill="currentColor" stroke="none"/>
+          <line x1="2" y1="13" x2="16" y2="13"/>
+          <circle cx="12" cy="13" r="2.5" fill="currentColor" stroke="none"/>
+        </svg>
+        Specifications
+      </button>
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 2H11L15 6V16H4V2Z"/>
+          <polyline points="11,2 11,6 15,6"/>
+          <line x1="6.5" y1="9.5" x2="12.5" y2="9.5"/>
+          <line x1="6.5" y1="12.5" x2="10" y2="12.5"/>
+        </svg>
+        Invoices
+      </button>
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="9" cy="6" r="3.5"/>
+          <path d="M1.5 17C1.5 13.2 4.9 10.5 9 10.5C13.1 10.5 16.5 13.2 16.5 17"/>
+        </svg>
+        Account
+      </button>
+
+      <!-- AI Copilot — active POC section -->
+      <button class="nav-item ai-item active">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 1.5L10.9 7H16.5L11.8 10.3L13.6 15.8L9 12.5L4.4 15.8L6.2 10.3L1.5 7H7.1Z"/>
+        </svg>
+        AI Copilot
+        <span class="ai-new-badge">New</span>
+      </button>
+
+      <button class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="9" cy="9" r="7.5"/>
+          <path d="M7 7C7 5.2 10.5 5 10.5 7.5C10.5 9.2 9 9.5 9 11.5"/>
+          <circle cx="9" cy="13.8" r=".7" fill="currentColor" stroke="none"/>
+        </svg>
+        Help / Contact
+      </button>
+
+    </nav>
+  </aside>
+
+
+  <!-- ══════════════════════════════════════════════════
+       MAIN WRAPPER
+       ══════════════════════════════════════════════════ -->
+  <div class="main-wrapper">
+
+    <!-- ── Wizard header (progress bar) ─────────────── -->
+    <header class="wizard-header">
+
+      <div class="wizard-steps">
+        <div class="step-wrapper">
+          <div class="step-circle" id="sc1">1</div>
+          <div class="step-label"  id="sl1">Specification</div>
+        </div>
+        <div class="step-line" id="ln1"></div>
+        <div class="step-wrapper">
+          <div class="step-circle off" id="sc2">2</div>
+          <div class="step-label off"  id="sl2">Upload method</div>
+        </div>
+        <div class="step-line off" id="ln2"></div>
+        <div class="step-wrapper">
+          <div class="step-circle off" id="sc3">3</div>
+          <div class="step-label off"  id="sl3">Upload</div>
+        </div>
+        <div class="step-line off" id="ln3"></div>
+        <div class="step-wrapper">
+          <div class="step-circle off" id="sc4">4</div>
+          <div class="step-label off"  id="sl4">Complete</div>
+        </div>
+      </div>
+
+      <button class="btn-logout">
+        Log out
+        <!-- icon-login equivalent: door + exit arrow, matches production app -->
+        <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4"/>
+          <polyline points="13,7 17,10 13,13"/>
+          <line x1="17" y1="10" x2="7" y2="10"/>
+        </svg>
+      </button>
+
+    </header>
+
+
+    <!-- ── Wizard content ────────────────────────────── -->
+    <div class="wizard-content">
+
+
+      <!-- ════════════════════════════════════════════
+           STEP 1 — SPECIFICATION
+           ════════════════════════════════════════════ -->
+      <div id="page-spec" class="wizard-page active">
+
+        <div class="page-title-row">
+          <div class="ptrow-left">
+            <h1 class="page-title">Select a specification <span class="info-icon">i</span></h1>
+          </div>
+          <button class="btn-next" onclick="goToStep(2)">Next</button>
+        </div>
+
+        <p class="section-label">Personal specifications</p>
+
+        <div class="spec-cards-wrap">
+
+          <div class="spec-card">
+            <div class="spec-card-head">
+              <div>
+                <div class="spec-card-name">POC Configuration</div>
+                <div class="spec-card-desc">e-commerce · bg-removal · 500×500 · auto-centre</div>
+              </div>
+              <div class="spec-checkbox">
+                <svg viewBox="0 0 14 14" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round">
+                  <polyline points="2,7 6,11 12,3"/>
+                </svg>
+              </div>
+            </div>
+
+            <div class="service-rows">
+
+              <!-- ── Background Removal ─── -->
+              <div class="service-row">
+                <div class="service-row-left">
+                  <div class="srow-header">
+                    <div class="srow-icon srow-icon-bg">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="4.5" cy="7" r="2"/>
+                        <circle cx="4.5" cy="13" r="2"/>
+                        <path d="M6.3 8L16 3.5M6.3 12L16 16.5M10 10h6"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <div class="service-row-name">Background Removal</div>
+                      <div class="service-row-detail">Remove original background &amp; replace with a solid colour or leave transparent</div>
+                    </div>
+                  </div>
+                  <div class="service-options open" id="opts-bg">
+                    <p class="opt-sublabel">Replacement colour</p>
+                    <div class="color-input-row">
+                      <div class="color-swatch" id="bg-preview" style="background:#ffffff" onclick="triggerPicker('bg-picker')" title="Click to pick colour">
+                        <input type="color" id="bg-picker" class="opt-color-picker" value="#ffffff" oninput="onPickerChange(this,'bg-hex','bg-preview')">
+                      </div>
+                      <input type="text" id="bg-hex" class="opt-input hex-input" value="#ffffff" maxlength="7" placeholder="#rrggbb" oninput="onHexInput(this.value,'bg-preview','bg-picker')">
+                    </div>
+                  </div>
+                </div>
+                <div class="toggle-wrap">
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="tog-bg" checked onchange="onToggle('tog-bg','opts-bg')">
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- ── Output Size ─── -->
+              <div class="service-row">
+                <div class="service-row-left">
+                  <div class="srow-header">
+                    <div class="srow-icon srow-icon-size">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                        <rect x="2" y="2" width="16" height="16" rx="2"/>
+                        <path d="M2 7h16M7 2v16"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <div class="service-row-name">Output Size</div>
+                      <div class="service-row-detail">Resize the output canvas to exact pixel dimensions for marketplace compliance</div>
+                    </div>
+                  </div>
+                  <div class="service-options open" style="display:block!important">
+                    <p class="opt-sublabel">Width × Height</p>
+                    <div class="size-input-row">
+                      <input type="number" id="out-w" class="opt-input size-num" value="500" min="1" max="9999">
+                      <span class="size-sep">×</span>
+                      <input type="number" id="out-h" class="opt-input size-num" value="500" min="1" max="9999">
+                      <span class="size-unit">px</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="toggle-wrap">
+                  <label class="toggle-switch">
+                    <input type="checkbox" checked disabled>
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- ── Centre Image ─── -->
+              <div class="service-row">
+                <div class="service-row-left">
+                  <div class="srow-header">
+                    <div class="srow-icon srow-icon-centre">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                        <circle cx="10" cy="10" r="3"/>
+                        <line x1="10" y1="2" x2="10" y2="6.5"/>
+                        <line x1="10" y1="13.5" x2="10" y2="18"/>
+                        <line x1="2" y1="10" x2="6.5" y2="10"/>
+                        <line x1="13.5" y1="10" x2="18" y2="10"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <div class="service-row-name">Auto-Centre</div>
+                      <div class="service-row-detail">Automatically centre the subject within the output canvas after cropping</div>
+                    </div>
+                  </div>
+                  <div class="centre-preview">
+                    <div class="centre-preview-frame">
+                      <div class="centre-preview-guide centre-guide-h"></div>
+                      <div class="centre-preview-guide centre-guide-v"></div>
+                      <div class="centre-preview-subject"></div>
+                    </div>
+                    <span class="centre-preview-label">Subject centred on 500 × 500 canvas</span>
+                  </div>
+                </div>
+                <div class="toggle-wrap">
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="tog-center" checked>
+                    <span class="toggle-track"></span>
+                  </label>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <button class="spec-add-btn">New &nbsp;+</button>
+
+        </div>
+      </div>
+
+
+      <!-- ════════════════════════════════════════════
+           STEP 2 — UPLOAD METHOD
+           ════════════════════════════════════════════ -->
+      <div id="page-method" class="wizard-page">
+
+        <div class="page-title-row">
+          <div class="ptrow-left">
+            <button class="btn-back" onclick="goToStep(1)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="10,3 5,8 10,13"/></svg>
+              Back
+            </button>
+            <h1 class="page-title">Select upload method</h1>
+          </div>
+          <button class="btn-next" onclick="goToStep(3)">Next</button>
+        </div>
+
+        <div class="method-cards-row">
+
+          <div class="method-card selected" id="mc-web" onclick="selectMethod('web')">
+            <div class="method-icon-wrap">
+              <svg viewBox="0 0 28 28" fill="none" stroke="#1C2B3C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 20V10M10 14l4-4 4 4"/>
+                <path d="M5 20.5A5 5 0 015.5 11a6 6 0 0111.6-1.5A4 4 0 0123 14h1a3 3 0 010 6H6"/>
+              </svg>
+            </div>
+            <div class="method-title">Manual Upload</div>
+            <div class="method-desc">Upload images directly from your computer via the browser. Supports drag-and-drop for multiple files.</div>
+            <div class="method-radio"><div class="method-radio-dot"></div> Selected</div>
+          </div>
+
+          <div class="method-card" id="mc-sftp" onclick="selectMethod('sftp')">
+            <div class="method-icon-wrap">
+              <svg viewBox="0 0 28 28" fill="none" stroke="#1C2B3C" stroke-width="2" stroke-linecap="round">
+                <rect x="3" y="4"  width="22" height="8" rx="1.5"/>
+                <rect x="3" y="16" width="22" height="8" rx="1.5"/>
+                <circle cx="22.5" cy="8"  r="1.5" fill="#1C2B3C" stroke="none"/>
+                <circle cx="22.5" cy="20" r="1.5" fill="#1C2B3C" stroke="none"/>
+              </svg>
+            </div>
+            <div class="method-title">SFTP Upload</div>
+            <div class="method-desc">Connect via SFTP to upload images from your server. Ideal for bulk orders and automated workflows.</div>
+            <div class="method-radio"><div class="method-radio-dot"></div> Select</div>
+            <div class="sftp-fields" id="sftp-fields">
+              <div class="sftp-field"><label>Host / IP</label><input type="text" placeholder="sftp.yourserver.com" autocomplete="off"></div>
+              <div class="sftp-field"><label>Username</label><input type="text" placeholder="username" autocomplete="off"></div>
+              <div class="sftp-field"><label>Password</label><input type="password" placeholder="••••••••" autocomplete="new-password"></div>
+              <div class="sftp-field"><label>Remote path</label><input type="text" placeholder="/images/input"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+
+      <!-- ════════════════════════════════════════════
+           STEP 3 — UPLOAD
+           ════════════════════════════════════════════ -->
+      <div id="page-upload" class="wizard-page">
+
+        <div class="page-title-row">
+          <div class="ptrow-left">
+            <button class="btn-back" onclick="goToStep(2)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="10,3 5,8 10,13"/></svg>
+              Back
+            </button>
+            <h1 class="page-title">Upload your images</h1>
+          </div>
+          <button class="btn-next" onclick="goToStep(4)">Next</button>
+        </div>
+
+        <div class="upload-layout">
+
+          <div>
+            <div class="upload-dropzone" id="upload-dz">
+              <svg class="dz-cloud-icon" width="58" height="58" viewBox="0 0 58 58" fill="none">
+                <circle cx="29" cy="29" r="28" fill="#1C2B3C"/>
+                <path d="M29 38V22M22 29l7-7 7 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <div class="dz-title">Drag and drop your files here</div>
+              <div class="dz-sub">Or click within this area to select your photos</div>
+              <input type="file" id="file-input" accept="image/*" multiple style="display:none">
+            </div>
+
+            <div class="upload-files-box">
+              <div class="upload-files-head">
+                <span class="upload-files-title">Your files</span>
+                <button class="btn-start-upload" onclick="startUpload()">Start Upload</button>
+                <input type="text" id="search-input" class="search-input" placeholder="To search…">
+              </div>
+              <div id="upload-empty" class="upload-empty" style="display:none">No files uploaded yet</div>
+              <div id="file-list" class="file-list"></div>
+            </div>
+          </div>
+
+          <div class="details-panel">
+            <div class="details-title">Details</div>
+            <div class="detail-row"><span class="detail-key">Specification</span><span class="detail-val" id="d-spec">POC Configuration</span></div>
+            <div class="detail-row"><span class="detail-key">Price per image</span><span class="detail-val">€ 9.65</span></div>
+            <div class="detail-row"><span class="detail-key">Number</span><span class="detail-val" id="d-count">…</span></div>
+            <div class="detail-row"><span class="detail-key">VAT</span><span class="detail-val">…</span></div>
+            <div class="detail-row"><span class="detail-key">Total price</span><span class="detail-val">…</span></div>
+            <div class="detail-divider"></div>
+            <div class="detail-row"><span class="detail-key">Order name</span><span class="detail-val"></span></div>
+            <div class="detail-row"><span class="detail-key">Order date</span><span class="detail-val" id="d-date">…</span></div>
+            <div class="detail-row"><span class="detail-key">Upload method</span><span class="detail-val" id="d-method">Web</span></div>
+          </div>
+
+        </div>
+      </div>
+
+
+      <!-- ════════════════════════════════════════════
+           STEP 4 — COMPLETE
+           ════════════════════════════════════════════ -->
+      <div id="page-complete" class="wizard-page">
+
+        <div class="page-title-row">
+          <div class="ptrow-left">
+            <button class="btn-back" onclick="goToStep(3)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="10,3 5,8 10,13"/></svg>
+              Back
+            </button>
+            <h1 class="page-title">Order complete</h1>
+          </div>
+          <button class="btn-next" onclick="goToStep(1)">New order</button>
+        </div>
+
+        <div class="complete-wrap">
+
+          <div class="complete-badge">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#2c9424" stroke-width="2.2" stroke-linecap="round"><polyline points="2,7 6,11 12,3"/></svg>
+            PROCESSING COMPLETE
+          </div>
+
+          <h2 class="complete-title">Your images are ready</h2>
+          <p class="complete-sub">All images have been processed — backgrounds removed, resized, centred and packaged for download.</p>
+
+          <!-- Stat cards (top row) -->
+          <div id="proc-summary" class="proc-summary"></div>
+
+          <!-- Batch section with filter pills + result grid -->
+          <div class="batch-section">
+            <div class="batch-section-hdr">
+              <div>
+                <div class="batch-title">Processed batch · <span id="batch-img-count">3</span> images</div>
+                <div class="batch-meta">Specification: <strong id="batch-spec-lbl">POC Configuration</strong> · all images auto-processed</div>
+              </div>
+              <button class="btn-rerun" onclick="goToStep(3)">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M11.5 7A4.5 4.5 0 1 1 7 2.5" stroke-linecap="round"/>
+                  <polyline points="11.5,2.5 11.5,7 7,7"/>
+                </svg>
+                Process again
+              </button>
+            </div>
+
+            <div class="filter-bar">
+              <div class="fpills">
+                <button class="fpill active" data-filter="all" onclick="setResultFilter(this)">All <span class="fpill-n" id="fpn-all">0</span></button>
+                <button class="fpill" data-filter="auto" onclick="setResultFilter(this)">Auto-processed <span class="fpill-n" id="fpn-auto">0</span></button>
+              </div>
+              <div class="ftpills">
+                <button class="ftpill active" data-ftype="all" onclick="setTypeFilter(this)">Both file types</button>
+                <button class="ftpill" data-ftype="jpeg" onclick="setTypeFilter(this)">JPEG <span class="ftpill-n" id="ftn-jpeg">0</span></button>
+                <button class="ftpill" data-ftype="png" onclick="setTypeFilter(this)">PNG <span class="ftpill-n" id="ftn-png">0</span></button>
+              </div>
+              <span class="filter-hint">Click any image to review</span>
+            </div>
+
+            <div id="result-grid" class="result-grid"></div>
+          </div>
+
+          <!-- Before & After -->
+          <div class="ba-section">
+            <div class="ba-section-title">Before &amp; After — side by side</div>
+            <div id="ba-row" class="ba-row"></div>
+          </div>
+
+          <div class="complete-actions">
+            <button class="btn-download" onclick="downloadResults()">Download all files</button>
+            <button class="btn-new-order" onclick="goToStep(1)">Create new order</button>
+          </div>
+
+        </div>
+      </div>
+
+
+    </div><!-- /wizard-content -->
+  </div><!-- /main-wrapper -->
+</div><!-- /app-layout -->
+
+
+<!-- ══════════════════════════════════════════════════
+     PROCESSING OVERLAY
+     ══════════════════════════════════════════════════ -->
+<div id="proc-overlay" class="proc-overlay">
+  <div class="proc-modal">
+
+    <div class="proc-modal-header">
+      <div class="proc-live-indicator">
+        <span class="proc-live-pulse"></span>
+        AI Processing Engine
+      </div>
+      <div class="proc-modal-batch">Batch · <span id="proc-img-total">3</span> images</div>
+    </div>
+
+    <div class="proc-modal-body">
+
+      <!-- Left: ring + thumbnails -->
+      <div class="proc-ring-col">
+        <div class="proc-ring-wrap">
+          <svg class="proc-ring-svg" viewBox="0 0 120 120">
+            <circle class="proc-ring-track" cx="60" cy="60" r="50"/>
+            <circle class="proc-ring-fill" cx="60" cy="60" r="50" id="proc-ring-fill"/>
+          </svg>
+          <div class="proc-ring-center">
+            <div class="proc-pct-line">
+              <span id="proc-pct-num">0</span><span class="proc-pct-sym">%</span>
+            </div>
+            <div class="proc-pct-sub">complete</div>
+          </div>
+        </div>
+        <div id="proc-thumb-row" class="proc-thumb-row"></div>
+      </div>
+
+      <!-- Right: step rows -->
+      <div class="proc-steps-col">
+
+        <div class="psr" id="psr-1">
+          <div class="psr-icon" id="psr-icon-1">
+            <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="7"/></svg>
+          </div>
+          <div class="psr-info">
+            <div class="psr-name">Removing backgrounds</div>
+            <div class="psr-desc">AI segmentation &amp; mask generation</div>
+          </div>
+          <div class="psr-badge" id="psr-badge-1">Queued</div>
+        </div>
+
+        <div class="psr" id="psr-2">
+          <div class="psr-icon" id="psr-icon-2">
+            <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="7"/></svg>
+          </div>
+          <div class="psr-info">
+            <div class="psr-name">Applying background colour</div>
+            <div class="psr-desc">Colour fill &amp; transparency handling</div>
+          </div>
+          <div class="psr-badge" id="psr-badge-2">Queued</div>
+        </div>
+
+        <div class="psr" id="psr-3">
+          <div class="psr-icon" id="psr-icon-3">
+            <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="7"/></svg>
+          </div>
+          <div class="psr-info">
+            <div class="psr-name">Resizing canvas</div>
+            <div class="psr-desc">Output dimensions &amp; DPI normalisation</div>
+          </div>
+          <div class="psr-badge" id="psr-badge-3">Queued</div>
+        </div>
+
+        <div class="psr" id="psr-4">
+          <div class="psr-icon" id="psr-icon-4">
+            <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="7"/></svg>
+          </div>
+          <div class="psr-info">
+            <div class="psr-name">Centring &amp; exporting</div>
+            <div class="psr-desc">Subject alignment &amp; file packaging</div>
+          </div>
+          <div class="psr-badge" id="psr-badge-4">Queued</div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="proc-modal-footer">
+      <div class="proc-prog-track">
+        <div class="proc-prog-fill" id="proc-prog-fill"></div>
+      </div>
+      <div class="proc-prog-text" id="proc-prog-text">Initialising AI engine…</div>
+    </div>
+
+  </div>
+</div>
+
+
+<script src="poc.js"></script>
+</body>
+</html>

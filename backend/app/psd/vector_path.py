@@ -66,6 +66,9 @@ _MIN_VERTICES = 3
 # Path resource IDs occupy 2000-2997; the resource that designates which one is the document's
 # clipping path is fixed at 2999. Only one saved path is written here, so it always gets 2000.
 PATH_RESOURCE_ID = 2000
+#: Last ID in the saved-path range. A layered scene allocates 2000, 2001, ... one per object, so
+#: the ceiling matters once there is more than one path in a file.
+MAX_PATH_RESOURCE_ID = 2997
 CLIPPING_PATH_DESIGNATION_ID = 2999
 
 

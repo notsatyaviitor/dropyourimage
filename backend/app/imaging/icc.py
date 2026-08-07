@@ -9,8 +9,8 @@ else), and shipping Adobe's own ``.icc`` file makes a licensed binary asset part
 So we synthesise one. A matrix-shaper RGB profile is small and fully specified: primaries as
 XYZ colorants in the D50 PCS, plus a gamma curve per channel. Roughly 500 bytes.
 
-Correctness is not assumed — `tests/test_icc.py` builds a transform from the generated profile
-to sRGB with littleCMS and checks known colours land where they should.
+Correctness is not assumed — `tests/test_export.py::TestIccProfileWriter` builds a transform from
+the generated profile to sRGB with littleCMS and checks known colours land where they should.
 """
 
 from __future__ import annotations

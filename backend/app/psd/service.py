@@ -17,6 +17,29 @@ from app.psd.photoshop_api import PhotoshopApiClient
 from app.psd.validate import validate_psd
 
 
+def produce_layered_psd(
+    *,
+    frame_rgb_linear: np.ndarray,
+    objects: list[tuple[str, np.ndarray]],
+    spec: PsdSpec,
+) -> tuple[bytes, list[Note]]:
+    """A scene as one named layer per object, over the untouched frame.
+
+    Distinct from `produce_psd`, which delivers a *product*: background fill, shadow layer, one
+    subject. This delivers a *scene* — the original frame as the bottom layer and each enumerated
+    object masked out above it, so a retoucher can address any single item.
+
+    Adobe is not attempted. Its API takes one cut-out and returns one composite; a layer-per-object
+    file is not something the documented endpoints express, so there is nothing to fall back from.
+    """
+    from app.psd.fallback import build_layered_psd
+
+    result = build_layered_psd(
+        frame_rgb_linear=frame_rgb_linear, objects=objects, spec=spec
+    )
+    return result.data, result.notes
+
+
 async def produce_psd(
     *,
     product_rgb_linear: np.ndarray,

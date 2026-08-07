@@ -23,19 +23,40 @@ class Settings(BaseSettings):
     photoroom_api_key: str = ""
     removebg_api_key: str = ""
     fal_key: str = ""
-    engine_pool: str = "photoroom,falai,removebg"
+    # remove.bg is deliberately absent: retired on accuracy, and at $0.20/image it was also the
+    # most expensive engine by 10x. The adapter and its tests remain in the tree, unused, so
+    # re-adding it here is the only change needed to bring it back.
+    #
+    # `gemini` is also absent, and that is load-bearing rather than an oversight. Its mask is a
+    # rasterised polygon, which scores 0.7246 and passes every one of autopick's reject rules —
+    # so in an AUTO pair it could out-score Photoroom while shipping a visibly worse edge. It is
+    # reachable only through EngineStrategy.SINGLE, where an operator has chosen it knowingly.
+    engine_pool: str = "photoroom,falai"
 
     # --- auto-pick tie-break --------------------------------------------------
     gemini_api_key: str = ""
     # NOT "gemini-3-flash" — that id does not exist. Verified live against listModels: the only
     # Gemini 3 Flash is this preview. gemini-2.5-flash is stable but measured as unable to
     # discriminate cut-out quality at all (answered "no difference" on an obvious 25px erosion).
-    gemini_model: str = "gemini-3-flash-preview"
+    gemini_model: str = "gemini-3.5-flash"
     gemini_tiebreak_enabled: bool = True
     # Deliberately short. The tie-break is advisory and the deterministic score already has an
     # answer, so a slow vision call must degrade rather than hold up a batch. Measured 7-32s on
     # gemini-3-flash-preview, so this will sometimes cut it off — that is the intended trade.
     gemini_timeout_seconds: float = 15.0
+
+    # --- Gemini as a segmentation engine (app/engines/gemini_segment.py) ------
+    # Separate from `gemini_model` on purpose. One setting used to drive both the locator and the
+    # tie-break, so tuning one silently retuned the other; segmentation would have made it three.
+    #
+    # Pinned to gemini-3.5-flash because the mask format differs by model, measured 7 Aug 2026:
+    # 3.5-flash returns a polygon (which this engine can rasterise), 3.6-flash returns COCO
+    # compressed RLE (which it cannot — it raises rather than guessing). Change this only
+    # alongside gemini_segment.py's parser.
+    gemini_segment_model: str = "gemini-3.5-flash"
+    # NOT gemini_timeout_seconds. That one is short because the tie-break is advisory and must
+    # degrade; this call *is* the mask, so it gets the same budget as any other vendor.
+    gemini_segment_timeout_seconds: float = 60.0
 
     # --- Adobe (PSD) ----------------------------------------------------------
     adobe_client_id: str = ""
@@ -59,6 +80,11 @@ class Settings(BaseSettings):
     max_uncompressed_bytes: int = 2_147_483_648
     max_image_bytes: int = 52_428_800
     max_image_pixels: int = 80_000_000
+
+    # Output-side counterpart to max_image_pixels. SizeSpec caps each axis at 20000, which leaves
+    # 400 MP (~8 GB of float32 buffers) reachable from a tiny request body. See
+    # pipeline._check_output_size.
+    max_output_pixels: int = 80_000_000
     vendor_timeout_seconds: float = 60.0
     vendor_max_retries: int = 3
     worker_concurrency: int = 8
@@ -113,6 +139,9 @@ class Settings(BaseSettings):
             EngineId.PHOTOROOM: self.photoroom_api_key,
             EngineId.REMOVEBG: self.removebg_api_key,
             EngineId.FALAI: self.fal_key,
+            # Shares the one Gemini key with the locator and the tie-break; only the model id and
+            # timeout are per-task.
+            EngineId.GEMINI: self.gemini_api_key,
             EngineId.LOCAL: "n/a",
         }.get(engine, "")
 
@@ -125,6 +154,9 @@ class Settings(BaseSettings):
         """Safe-to-log view. Used by the startup banner and the /health endpoint."""
         return {
             "engines_configured": [e.value for e in self.engine_priority if self.key_for(e)],
+            # Reported separately from `engines_configured` because it is deliberately not in
+            # ENGINE_POOL — it is selectable, but never auto-picked. See the engine_pool comment.
+            "gemini_segment_selectable": bool(self.gemini_api_key),
             "gemini_tiebreak": bool(self.gemini_api_key),
             "adobe_psd": self.adobe_configured,
             "upscaler": self.upscaler_enabled,

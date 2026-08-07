@@ -1,15 +1,19 @@
-# OPTIONAL — only needed if Adobe Firefly Services access does not land (it did not — no Adobe
-# credentials were provided for this build; see docs/PSD.md).
+# SUPERSEDED 7 Aug 2026 — do not install this file. It is kept only so existing instructions and
+# scripts that reference it do not silently install a *second*, unpinned pytoshop alongside the
+# pinned one.
 #
-# pytoshop WRITES layered PSDs in pure Python. Kept out of requirements.txt on purpose: it builds
-# a Cython extension and is unmaintained (last release 1.2.1, no numpy upper bound declared in
-# its own metadata — verified directly; an earlier version of this comment overclaimed a
-# numpy<2 requirement that doesn't actually exist in pytoshop itself). A failed build here must
-# not block the imaging core or the test suite either way, hence the separate file.
+# `pytoshop==1.2.1` now lives in requirements.txt, where it belongs.
 #
-# Install only when the fallback is actually triggered:
-#   pip install -r requirements-psd-fallback.txt
+# Why the original split was wrong: this file existed so a failed Cython build could not block the
+# imaging core. That reasoning was sound, but the consequence was not — Adobe Firefly is
+# enterprise-quoted and never landed, so the pytoshop writer is the ONLY path that ships a PSD.
+# Keeping it optional meant layered PSD did not work at all, and the two PSD test suites *skipped*
+# rather than failed, so nothing reported the outage. See docs/PSD.md.
 #
-# If it fails to build, do not fight it. Drop to raster layer masks (cut-list item 6) and say so.
-
-pytoshop==1.2.1
+# The original concern is now handled properly instead: app/psd/fallback.py guards its import, so a
+# machine where the build fails raises a typed `psd_unavailable` on PSD jobs while every other
+# output format keeps working. That is what "must not block the imaging core" should always have
+# meant.
+#
+# To install dependencies, use:
+#   pip install -r requirements.txt

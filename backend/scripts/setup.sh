@@ -4,7 +4,8 @@
 #
 #   cd backend && ./scripts/setup.sh && source .venv/bin/activate
 #
-# Deliberately does NOT install requirements-psd-fallback.txt (see that file for why).
+# requirements.txt now includes pytoshop (the PSD writer), so this installs everything needed.
+# requirements-psd-fallback.txt is SUPERSEDED — do not install it, see the note in that file.
 
 set -euo pipefail
 

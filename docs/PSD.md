@@ -5,6 +5,30 @@ client report's Feature 2 naming convention (confirmed against pages 6–7 of th
 the highest-risk item in the delivery plan, and the one most worth reading carefully before
 demoing or shipping.
 
+## Fixed 7 Aug 2026 — it was failing outright
+
+Layered PSD did not work at all, for two reasons that compounded:
+
+1. **`pytoshop` was not installed and not in `requirements.txt`**, and `fallback.py` imported it at
+   module scope. `service.py` imports `fallback.py` and `pipeline.py` imports `service.py`, so a PSD
+   job died with a bare `ModuleNotFoundError` reported to the user as `internal_error` — despite
+   `PsdUnavailable` existing in the taxonomy for precisely this. It is now pinned at `1.2.1`, the
+   import is guarded, and a missing wheel yields a typed, actionable error while every non-PSD
+   format keeps working.
+2. **`validate.py` string-matched an `IntEnum`.** It tested `'RGB' not in str(psd.color_mode)`.
+   **Python 3.11 changed `IntEnum.__str__` to return the bare number**, so `str(ColorMode.RGB)` went
+   from `"ColorMode.RGB"` to `"3"` and the validator began rejecting every correctly-written RGB
+   PSD. The writer was fine the whole time.
+
+**Why neither was caught:** `test_psd_fallback.py` and `test_psd_pipeline.py` both skipped when
+`pytoshop` was absent. The suite reported `393 passed, 2 skipped` and looked healthy while the
+feature was dead — and behind those 2 skips sat **7 genuinely failing assertions**. Regression tests
+in `tests/test_psd_availability.py` now cover both defects and are written so they cannot skip.
+
+Verified live through the running API against **both** Photoroom and Gemini cut-outs: 500×500, RGB
+8-bit, layers `BG`/`SHADOW`/`PROD` each carrying their own pixels, a real 16-vertex vector clipping
+path, ICC embedded, and `validate_psd` clean with no problems.
+
 ## Architecture: try Adobe, fall back to pure Python
 
 ```
@@ -94,14 +118,39 @@ Neither would have been caught by checking layer names or file structure alone �
 (`psd_tools.PSDImage.composite(force=True)`) and checks pixel values, specifically to guard
 against this class of defect recurring.
 
-### `force=True` is required to see the real content
+### The blank flattened preview — diagnosed once, misjudged, fixed 7 Aug 2026
 
-`pytoshop` never writes a genuine flattened top-level preview (only a blank placeholder), and
-`psd-tools`' `.composite()` silently prefers that stale preview over real layer compositing
-whenever the file merely *declares* one exists — regardless of content. The first composite
-render of a demo file came back solid black for exactly this reason, before `force=True` was
-found. A real Photoshop open always recomposites from the actual layers regardless, so this is a
-`psd-tools`-quick-preview quirk, not a defect in the files this module writes.
+`pytoshop`'s `nested_layers_to_psd` writes layer records but **never populates
+`PsdFile.image_data`**, the flattened composite PSD carries at the end of the file. It was left as
+all zeros, i.e. solid black.
+
+This was found earlier and written up here as *"a `psd-tools`-quick-preview quirk, not a defect in
+the files this module writes"*, with `force=True` added to the tests to render from layers instead.
+**That conclusion was wrong, and the workaround hid a real defect for a fortnight.** Photoshop does
+re-composite from layers, so the file looked correct in the one place that was hardest to check —
+but every *other* consumer trusts the merged section:
+
+- OS thumbnailers and file-manager previews
+- macOS Preview, most image viewers, most web-based PSD viewers
+- `psd_tools.PSDImage.composite()` without `force=True`
+- anything generating a proof or contact sheet
+
+A client opening a delivered PSD in anything but Photoshop saw a black rectangle. Reported from a
+real 500×500 delivery whose layers were perfect: `BG` mean 1.000, `PROD` mean 0.161, composite mean
+**0.000**.
+
+`fallback.py::_merged_composite` now renders the stack and assigns `psd.image_data`. It blends in
+**gamma-encoded space**, not linear light, because it must reproduce what the *layers* render to —
+Photoshop's Normal blend works in encoded space (the same measured behaviour the shadow-layer note
+below documents). A preview that disagreed with its own layers would be a worse bug than a blank
+one. Verified: the written composite matches an independent re-render of the layer stack to within
+1.14/255, i.e. rounding.
+
+**The lesson worth keeping:** structural validation passed throughout — correct layer names, correct
+count, valid ICC, real vector path. Only rendering the *merged section specifically* caught it.
+`tests/test_psd_availability.py::TestMergedComposite` asserts on those pixels and deliberately does
+**not** pass `force=True`, because reading the file the way an ordinary consumer does is the entire
+point.
 
 ### The shadow layer is a known, understood approximation
 
@@ -130,8 +179,9 @@ emulating Photoshop's internal compositing space precisely, out of scope here.
 
 ```bash
 cd backend && source .venv/bin/activate
-pip install -r requirements-psd-fallback.txt   # pytoshop; skipped gracefully if absent
-pytest tests/test_psd_fallback.py tests/test_psd_vector_path.py tests/test_psd_pipeline.py -q
+pip install -r requirements.txt   # pytoshop==1.2.1 is pinned here now, not optional
+pytest tests/test_psd_fallback.py tests/test_psd_vector_path.py tests/test_psd_pipeline.py \
+       tests/test_psd_availability.py -q
 python scripts/demo.py   # writes data/output/ including a .psd — open it and look
 ```
 
