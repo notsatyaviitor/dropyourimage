@@ -75,11 +75,55 @@ class Settings(BaseSettings):
     signed_url_ttl_seconds: int = 900
 
     # --- limits: security controls, not tuning knobs (see docs/SECURITY.md) ---
-    max_zip_bytes: int = 524_288_000
+    #
+    # These bound ONE uploaded archive. A bulk job arrives as several archives (see
+    # `app/api/routes.py`'s chunked upload), so each of them is screened independently by exactly
+    # the guards it always had — a batch is not a trusted caller just because an earlier batch of
+    # the same job passed.
+    # **Every byte cap here treats 0 as "no limit."** Same convention as `max_job_cost_usd`.
+    max_zip_bytes: int = 1_073_741_824
     max_zip_entries: int = 200
-    max_uncompressed_bytes: int = 2_147_483_648
-    max_image_bytes: int = 52_428_800
+    max_uncompressed_bytes: int = 4_294_967_296
+
+    # Unlimited by default, deliberately, and this is the one limit here that is NOT a security
+    # control — which is why it is the one that can be switched off.
+    #
+    # A byte count measures the container, not the threat. The client's PSDs are 130 MB and one is
+    # 260 MB, all 45.4 MP; a 500 KB PNG can decode to 400 MP. So a byte cap refuses legitimate
+    # source material while a real decompression bomb walks straight past it. Every value tried
+    # here was wrong for someone: 50 MB rejected all 132 test images, 200 MB rejected the 260 MB
+    # one — and each rejection cost a debugging round to trace back to a number in a config file.
+    #
+    # **`max_image_pixels` below is the actual guard and is unchanged.** It bounds what decode
+    # allocates, which is what a bomb attacks. What removing the byte cap really does is make
+    # available RAM the ceiling instead of a configured number, since an entry is held in memory
+    # while it is read — see docs/SECURITY.md.
+    max_image_bytes: int = 0
     max_image_pixels: int = 80_000_000
+
+    # --- job-level limits: the bulk counterparts of the per-archive guards above -------------
+    #
+    # Per-archive caps bound a single upload; without these, N uploads against one job id would
+    # multiply straight through them. Both are enforced on the *accumulated* job, in
+    # `routes.py::_accept_batch`, at the point a new batch is appended.
+    max_job_images: int = 500
+    # 24 GB. Sized against the real thing rather than a round number: the client's PSD set is
+    # 132 x 130 MB = 16.8 GB for ONE order, so the previous 4 GB refused it at about file 30.
+    # This is storage, not memory — the worker holds one archive at a time (see app/jobs.py).
+    max_job_upload_bytes: int = 25_769_803_776
+
+    # Above this, memory mode refuses the job rather than running it inline in the request
+    # handler. Processing 400 images takes minutes to tens of minutes, and a POST that blocks for
+    # that long is a timeout with a half-finished job behind it, not a slow success. Small jobs
+    # keep running inline so `pytest` and a keyless first run need no Redis and no MinIO — the
+    # same trade `app/queue.py` documents. See `errors.BulkRequiresWorker`.
+    inline_job_max_images: int = 25
+
+    # Hard ceiling on one job's vendor spend. A 400-image batch on the dual-engine pool is ~$24,
+    # against a POC budget of roughly $1,300/month — so a mis-clicked or runaway job is a real
+    # fraction of it. The job stops and reports partial results rather than spending past this;
+    # see `app/jobs.py::_budget_exhausted`. Set to 0 to disable.
+    max_job_cost_usd: float = 25.0
 
     # Output-side counterpart to max_image_pixels. SizeSpec caps each axis at 20000, which leaves
     # 400 MP (~8 GB of float32 buffers) reachable from a tiny request body. See
@@ -87,6 +131,20 @@ class Settings(BaseSettings):
     max_output_pixels: int = 80_000_000
     vendor_timeout_seconds: float = 60.0
     vendor_max_retries: int = 3
+
+    # Largest payload we will send a segmentation vendor. Distinct from `max_image_bytes`, which
+    # is about what WE accept — this is about what the vendor will.
+    #
+    # Measured against Photoroom: a 130 MB BMP was refused with a bare 413, while the same pixels
+    # re-encoded to PNG (41.3 MB) were accepted and segmented. 48 MB sits above the known-good
+    # figure and far below the known-bad one. Lower it if a vendor starts 413-ing; the pipeline
+    # then re-encodes, and downscales only if re-encoding alone is not enough.
+    vendor_max_upload_bytes: int = 50_331_648
+
+    # Floor for that downscaling. Below this a mask stops being useful for a full-resolution
+    # composite, so failing with the vendor's own error beats silently shipping a mask derived
+    # from a thumbnail.
+    vendor_min_long_edge_px: int = 1024
     worker_concurrency: int = 8
 
     cache_cutouts: bool = True
@@ -162,6 +220,24 @@ class Settings(BaseSettings):
             "upscaler": self.upscaler_enabled,
             "queue": self.queue_name,
             "cache_cutouts": self.cache_cutouts,
+            # Published so the browser sizes its upload batches from the server's actual limits
+            # rather than a hardcoded guess that drifts out of step with them. `bulk_enabled`
+            # answers the one question the UI has to ask before offering a 400-image upload:
+            # is there a worker behind this, or will anything over `inline_max_images` be
+            # refused? See frontend/src/api/client.ts::getLimits.
+            "limits": {
+                "max_batch_images": self.max_zip_entries,
+                "max_batch_bytes": self.max_zip_bytes,
+                "max_job_images": self.max_job_images,
+                "max_job_upload_bytes": self.max_job_upload_bytes,
+                # Published so an over-size file is caught in the picker rather than after it has
+                # been uploaded and rejected. A 130 MB PSD reported back as a per-image result is
+                # a round trip and a confusing error for something knowable before sending.
+                "max_image_bytes": self.max_image_bytes,
+                "inline_max_images": self.inline_job_max_images,
+                "bulk_enabled": self.redis_url not in ("", "memory"),
+                "max_job_cost_usd": self.max_job_cost_usd,
+            },
         }
 
 

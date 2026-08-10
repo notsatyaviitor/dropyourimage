@@ -171,6 +171,7 @@ class ErrorCode(str, Enum):
     VENDOR_TIMEOUT = "vendor_timeout"
     VENDOR_UNAUTHORIZED = "vendor_unauthorized"     # missing or rejected key
     VENDOR_OUT_OF_CREDITS = "vendor_out_of_credits"  # key is valid, the account needs topping up
+    VENDOR_PAYLOAD_TOO_LARGE = "vendor_payload_too_large"  # vendor 413; retrying sends the same bytes
     NO_FOREGROUND_FOUND = "no_foreground_found"      # engine saw nothing to cut out
     UNSUPPORTED_FILE = "unsupported_file"
     FILE_TOO_LARGE = "file_too_large"
@@ -178,6 +179,10 @@ class ErrorCode(str, Enum):
     MALICIOUS_ARCHIVE = "malicious_archive"         # zip-slip / bomb guard tripped
     IMAGE_DECODE_FAILED = "image_decode_failed"
     PSD_UNAVAILABLE = "psd_unavailable"             # Adobe creds absent; see docs/PSD.md
+    BATCH_TOO_LARGE = "batch_too_large"             # job-level image/byte cap, not a per-file one
+    BULK_REQUIRES_WORKER = "bulk_requires_worker"   # too big to run inline; needs Redis + rq worker
+    BUDGET_EXCEEDED = "budget_exceeded"             # job hit MAX_JOB_COST_USD; partial results kept
+    JOB_CANCELLED = "job_cancelled"                 # cancelled by the operator mid-run
     INTERNAL_ERROR = "internal_error"
 
 
@@ -256,6 +261,21 @@ class Note(str, Enum):
       Delivered as PNG instead.
 
     `ImageResult.source_format` says what arrived, so the UI can name both sides of the swap.
+    """
+
+    VENDOR_DOWNSCALED = "vendor_downscaled"
+    """The image was reduced before being sent to the segmentation vendor, so the mask was
+    computed at less than full resolution and then scaled back up.
+
+    **Only the mask is affected — no output pixel is.** Engines return alpha and never colour
+    (`app/engines/base.py`), and the pipeline composites its own full-resolution original, so the
+    product is untouched. What degrades is edge precision: a boundary resolved at 4096px and
+    interpolated up to 5504px is softer and less accurate than one resolved natively.
+
+    Emitted only when re-encoding alone could not get the payload under
+    `VENDOR_MAX_UPLOAD_BYTES` — a 130 MB BMP becomes a 41 MB PNG of identical pixels and needs no
+    downscaling at all. It has to be surfaced because it is a real quality difference the operator
+    did not ask for, and `docs/LIMITATIONS.md` forbids quietly degrading output.
     """
 
     HARD_EDGED_MASK = "hard_edged_mask"
@@ -473,7 +493,14 @@ class PsdSpec(StrictModel):
 
 
 class ExportSpec(StrictModel):
-    formats: list[OutputFormat] = Field(default_factory=lambda: [OutputFormat.PNG])
+    formats: list[OutputFormat] = Field(
+        default_factory=lambda: [OutputFormat.PNG],
+        description=(
+            "Formats delivered for EVERY image, regardless of what arrived. May be empty when "
+            "`match_source` is true, which is how you ask for 'give me back exactly what I "
+            "uploaded, in its own format, and nothing else'."
+        ),
+    )
     match_source: bool = Field(
         default=True,
         description=(
@@ -489,14 +516,31 @@ class ExportSpec(StrictModel):
 
     @field_validator("formats")
     @classmethod
-    def _non_empty_unique(cls, v: list[OutputFormat]) -> list[OutputFormat]:
-        if not v:
-            raise ValueError("export.formats must not be empty")
+    def _unique(cls, v: list[OutputFormat]) -> list[OutputFormat]:
         seen: list[OutputFormat] = []
         for f in v:                          # order-preserving dedupe; order is user intent
             if f not in seen:
                 seen.append(f)
         return seen
+
+    @model_validator(mode="after")
+    def _something_is_delivered(self) -> "ExportSpec":
+        """An empty `formats` is legal only when `match_source` fills it in.
+
+        The old rule was a flat "must not be empty", which made "the same format I uploaded, and
+        only that" impossible to express: `formats` needed at least one entry, so every image
+        picked up an extra file nobody asked for — a PNG beside every PSD, doubling a 132-image
+        order into 264 files.
+
+        Both empty and false still has to be rejected, because it asks for no output at all.
+        """
+        if not self.formats and not self.match_source:
+            raise ValueError(
+                "export.formats is empty and match_source is false, so nothing would be "
+                "delivered. Set match_source true to return each image in its own format, or "
+                "name at least one format."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +621,22 @@ class EngineCandidate(StrictModel):
 
 class OutputAsset(StrictModel):
     format: OutputFormat
-    url: str = Field(description="Short-lived signed URL; expires per SIGNED_URL_TTL_SECONDS.")
+    url: str = Field(
+        description=(
+            "Short-lived signed URL, minted when this record is READ rather than when the asset "
+            "was written — see `key`. Valid for SIGNED_URL_TTL_SECONDS from the response, not "
+            "from whenever during the job the image happened to finish."
+        )
+    )
+    key: str = Field(
+        default="",
+        description=(
+            "Storage key the URL is signed from. Present so the URL can be re-minted on every "
+            "read: a 400-image job runs far longer than the signed-URL TTL, so a URL frozen at "
+            "write time is already dead by the time the results page renders. Empty only on "
+            "records written before this field existed."
+        ),
+    )
     width: int
     height: int
     bytes: int
@@ -628,6 +687,19 @@ class ImageResult(StrictModel):
             "UI both halves of a swap — 'you sent CR2, we delivered TIFF'."
         ),
     )
+    source_preview_url: str | None = Field(
+        default=None,
+        description=(
+            "Small PNG of the file AS UPLOADED, for the UI's 'before' panel. Set only when the "
+            "source format is one no browser can paint (EPS, PSD, TIFF, camera raw) — for PNG, "
+            "JPEG, BMP and WebP the client shows the local file instead, which is free and full "
+            "resolution. Signed on read like every other asset, and NOT a deliverable: it is "
+            "excluded from the download bundle."
+        ),
+    )
+    source_preview_key: str | None = Field(
+        default=None, description="Storage key behind `source_preview_url`; re-signed on read."
+    )
 
     cost_usd: float = 0.0
     duration_ms: int | None = None
@@ -656,12 +728,63 @@ class JobStatus(StrictModel):
     bundle_url: str | None = Field(
         default=None, description="Signed zip of all outputs; present once COMPLETED."
     )
+    bundle_key: str | None = Field(
+        default=None,
+        description="Storage key behind `bundle_url`, re-signed on read for the same reason.",
+    )
+
+    # --- bulk ---------------------------------------------------------------------------------
+    batches: int = Field(
+        default=0,
+        description=(
+            "Upload archives accepted for this job. A browser splits a large selection across "
+            "several POSTs to keep its own memory bounded; each arrives as one archive."
+        ),
+    )
+    upload_bytes: int = Field(
+        default=0, description="Accumulated size of the accepted archives, against MAX_JOB_UPLOAD_BYTES."
+    )
+    accepting_uploads: bool = Field(
+        default=False,
+        description=(
+            "True between the first batch and `POST /jobs/{id}/start`. While true the job is a "
+            "draft: it has a config and some images, and nothing has been billed."
+        ),
+    )
+    rate_limit_events: int = Field(
+        default=0,
+        description=(
+            "Times a vendor throttled us during this job. Reported so a slow batch can be "
+            "explained honestly rather than looking like the pipeline stalled."
+        ),
+    )
+    images_total: int = Field(
+        default=0,
+        description=(
+            "How many ImageResults this job has, independent of how many are in `images` — the "
+            "poll response can omit or paginate them. Equal to len(images) on a full response."
+        ),
+    )
 
     @property
     def progress_pct(self) -> float:
         if self.total == 0:
             return 0.0
         return round(100.0 * (self.completed + self.failed) / self.total, 1)
+
+
+class ImagePage(StrictModel):
+    """One page of `JobStatus.images`, from `GET /jobs/{id}/images`.
+
+    Exists because polling a 400-image job every 1.2s for its full record moves megabytes per
+    second for data the UI is not showing — the grid renders a page at a time.
+    """
+
+    job_id: str
+    offset: int
+    limit: int
+    total: int
+    images: list[ImageResult] = Field(default_factory=list)
 
 
 class JobCreated(StrictModel):
@@ -672,3 +795,42 @@ class JobCreated(StrictModel):
     total: int
     config_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    batches: int = Field(
+        default=0, description="Archives accepted so far, including the one this call added."
+    )
+    accepting_uploads: bool = Field(
+        default=False,
+        description=(
+            "True when this call sent `start=false`, meaning the job is holding for more batches. "
+            "The client must finish with `POST /jobs/{id}/start` or the job never runs."
+        ),
+    )
+
+
+class CostEstimate(StrictModel):
+    """`POST /jobs/estimate` response.
+
+    **Every figure here is an estimate**, and the field names say so. Vendor prices in this
+    codebase are list prices recorded per engine (`BackgroundRemover.cost_per_image_usd`), not
+    measured invoices, and the real total moves with cache hits, retries and per-object
+    multiplication. It is published so a 400-image click is an informed one, not so it can be
+    quoted at anybody — see the pricing note in `frontend/src/steps/UploadStep.tsx`.
+    """
+
+    images: int
+    engines: list[EngineId]
+    cost_per_image_usd: float
+    estimated_cost_usd: float
+    per_object_pricing: bool = Field(
+        default=False,
+        description=(
+            "True when cutout.multi_object is on, in which case the real cost is this figure "
+            "MULTIPLIED by the object count found in each scene — nine objects is nine calls. "
+            "The estimate cannot know that count in advance, so it is a floor, not a total."
+        ),
+    )
+    ceiling_usd: float = Field(
+        default=0.0, description="MAX_JOB_COST_USD. The job stops here. 0 means no ceiling."
+    )
+    exceeds_ceiling: bool = False

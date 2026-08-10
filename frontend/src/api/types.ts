@@ -42,6 +42,22 @@ export const BROWSER_RENDERABLE: OutputFormat[] = ['png', 'jpeg', 'webp', 'bmp']
 /** Sources that cannot be written back, so `match_source` substitutes 16-bit TIFF. */
 export const RAW_EXTENSIONS = ['.crw', '.cr2', '.cr3', '.dng', '.nef', '.raw'] as const
 
+/**
+ * Extensions a browser can paint from a local `File`. The INPUT-side mirror of
+ * BROWSER_RENDERABLE, and the reason the before/after row was blank for every PSD and EPS: the
+ * user's source file was being handed straight to an `<img>` that cannot decode it.
+ *
+ * For anything not in this list the backend supplies `source_preview_url` instead.
+ */
+export const RENDERABLE_SOURCE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.bmp'] as const
+
+export function isBrowserRenderableFile(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return false
+  const ext = name.slice(dot).toLowerCase()
+  return (RENDERABLE_SOURCE_EXTENSIONS as readonly string[]).includes(ext)
+}
+
 export type ColorProfile = 'srgb' | 'adobe_rgb'
 export type JobState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type ImageState = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
@@ -52,6 +68,7 @@ export type ErrorCode =
   | 'vendor_timeout'
   | 'vendor_unauthorized'
   | 'vendor_out_of_credits'
+  | 'vendor_payload_too_large'
   | 'no_foreground_found'
   | 'unsupported_file'
   | 'file_too_large'
@@ -59,6 +76,10 @@ export type ErrorCode =
   | 'malicious_archive'
   | 'image_decode_failed'
   | 'psd_unavailable'
+  | 'batch_too_large'
+  | 'bulk_requires_worker'
+  | 'budget_exceeded'
+  | 'job_cancelled'
   | 'internal_error'
 
 /**
@@ -78,6 +99,7 @@ export type Note =
   | 'subject_not_found'
   | 'busy_scene'
   | 'hard_edged_mask'
+  | 'vendor_downscaled'
   | 'format_substituted'
   | 'multi_object'
   | 'psd_fallback_raster'
@@ -107,6 +129,8 @@ export const NOTE_LABELS: Record<Note, string> = {
   hard_edged_mask:
     'Gemini returns the mask as a polygon, so this cut-out has a hard edge with no soft alpha. Edge decontamination had nothing to work on, so expect a halo against saturated background colours. Photoroom preserves the soft edge.',
   alpha_suspect: 'Cut-out passed automatic checks but scored low — worth a manual look.',
+  vendor_downscaled:
+    'This image was too large to send the segmentation service at full resolution, so the mask was computed on a reduced copy and scaled back up. Only mask precision is affected — the product pixels are the full-resolution original — but edges will be softer than usual.',
   psd_fallback_raster: 'PSD written without a vector clipping path (layers and mask only).',
   cover_cropped: 'Cover fit removed some product pixels to fill the canvas.',
 }
@@ -223,7 +247,14 @@ export interface EngineCandidate {
 
 export interface OutputAsset {
   format: OutputFormat
+  /**
+   * Signed URL, minted when this record was READ rather than when the asset was written — a
+   * 400-image job runs far longer than the 15-minute TTL, so a URL frozen at write time would be
+   * dead before the results page rendered. Valid for the TTL from the response that carried it.
+   */
   url: string
+  /** Storage key the URL is signed from. Never fetched directly; it exists so the URL can be re-minted. */
+  key: string
   width: number
   height: number
   bytes: number
@@ -243,6 +274,13 @@ export interface ImageResult {
   source_size: [number, number] | null
   /** What arrived. Paired with `format_substituted` it names both halves of the swap. */
   source_format: SourceFormat | null
+  /**
+   * Small PNG of the file AS UPLOADED, for the "before" panel. Set only when the source is a
+   * format no browser paints (EPS, PSD, TIFF, camera raw); null for PNG/JPEG/BMP/WebP, where the
+   * client shows the user's own File instead — free, instant and full resolution.
+   */
+  source_preview_url: string | null
+  source_preview_key: string | null
   /**
    * An extra viewable asset the backend added only so the UI has something to show, set when no
    * requested format renders in a browser. Present in `outputs` but NOT a deliverable: exclude it
@@ -268,10 +306,34 @@ export interface JobStatus {
   created_at: string
   started_at: string | null
   finished_at: string | null
+  /** Empty when polled with `include_images=false`. Use `images_total` for the count either way. */
   images: ImageResult[]
   error: ErrorInfo | null
   cost_usd: number
   bundle_url: string | null
+  bundle_key: string | null
+
+  // --- bulk ---------------------------------------------------------------
+  /** Upload archives accepted for this job. A large selection is split across several. */
+  batches: number
+  upload_bytes: number
+  /** True between the first batch and `POST /jobs/{id}/start`. */
+  accepting_uploads: boolean
+  /**
+   * Times a vendor throttled us. Surfaced so a slow batch reads as "the vendor is rate-limiting"
+   * rather than "the pipeline stalled" — see frontend/CLAUDE.md on distinguishing error causes.
+   */
+  rate_limit_events: number
+  /** How many ImageResults exist, independent of how many `images` actually carries. */
+  images_total: number
+}
+
+export interface ImagePage {
+  job_id: string
+  offset: number
+  limit: number
+  total: number
+  images: ImageResult[]
 }
 
 export interface JobCreated {
@@ -280,6 +342,50 @@ export interface JobCreated {
   total: number
   config_hash: string
   created_at: string
+  batches: number
+  /** True when this call sent `start=false`; finish with `POST /jobs/{id}/start` or it never runs. */
+  accepting_uploads: boolean
+}
+
+/**
+ * `POST /jobs/estimate`. **Every figure is an estimate** — list prices per engine, not invoices,
+ * and the real total moves with cache hits and retries. It exists so a 400-image click is an
+ * informed one. Never relabel any of it as a price or a quote (frontend/CLAUDE.md).
+ */
+export interface CostEstimate {
+  images: number
+  engines: EngineId[]
+  cost_per_image_usd: number
+  estimated_cost_usd: number
+  /** Multi-object bills per object, and the count is unknowable in advance — so this is a floor. */
+  per_object_pricing: boolean
+  ceiling_usd: number
+  exceeds_ceiling: boolean
+}
+
+/** Server-published upload limits, from `GET /health`. Sized from these, never from a guess. */
+export interface ServerLimits {
+  max_batch_images: number
+  max_batch_bytes: number
+  max_job_images: number
+  max_job_upload_bytes: number
+  /** Per-image byte cap. Checked in the picker so an over-size file never costs a round trip. */
+  max_image_bytes: number
+  inline_max_images: number
+  /** False when no queue is REACHABLE (not merely configured) — bulk will be refused. */
+  bulk_enabled: boolean
+  max_job_cost_usd: number
+}
+
+export const FALLBACK_LIMITS: ServerLimits = {
+  max_batch_images: 200,
+  max_batch_bytes: 1_073_741_824,
+  max_job_images: 500,
+  max_job_upload_bytes: 25_769_803_776,
+  max_image_bytes: 209_715_200,
+  inline_max_images: 25,
+  bulk_enabled: false,
+  max_job_cost_usd: 25,
 }
 
 /** Not sent over the wire — computed client-side the same way JobStatus.progress_pct is on the backend. */

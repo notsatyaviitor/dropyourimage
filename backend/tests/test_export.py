@@ -235,3 +235,34 @@ class TestDimensions:
     def test_reads_size_without_decoding(self):
         blob = E.encode(flat_linear("#FFFFFF", 12, 34), None, fmt=OutputFormat.PNG)
         assert E.dimensions_of(blob) == (34, 12)
+
+
+class TestContentTypes:
+    """Every deliverable format must be served as what it is.
+
+    BMP was missing from `CONTENT_TYPES` and fell through to `application/octet-stream`. Nothing
+    errored — the file was correct and downloadable — but BMP is in `BROWSER_RENDERABLE`, so a
+    BMP-only job gets no PNG preview and the results grid puts the BMP straight into an `<img>`.
+    A browser will not render an octet-stream inline, so the card was blank with nothing to fall
+    back on. Silent, and specific to one format, which is why it wants a test over the whole enum
+    rather than one for BMP.
+    """
+
+    def test_every_output_format_has_a_real_content_type(self):
+        from app.storage.base import content_type_for
+
+        wrong = {
+            fmt.value: content_type_for(f"x.{fmt.value}")
+            for fmt in OutputFormat
+            if content_type_for(f"x.{fmt.value}") == "application/octet-stream"
+        }
+        assert not wrong, f"formats served as an opaque blob: {wrong}"
+
+    def test_browser_renderable_formats_are_served_as_images(self):
+        """The stricter half: `image/*` is what actually makes an <img> paint."""
+        from app.imaging import formats as F
+        from app.storage.base import content_type_for
+
+        for fmt in F.BROWSER_RENDERABLE:
+            ct = content_type_for(f"x.{fmt.value}")
+            assert ct.startswith("image/"), f"{fmt.value} is renderable but served as {ct}"

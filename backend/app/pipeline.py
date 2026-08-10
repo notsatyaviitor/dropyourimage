@@ -204,7 +204,9 @@ def _check_output_size(config: JobConfig, settings: Settings) -> None:
 def _decode(
     image_bytes: bytes, settings: Settings, source: SourceFormat | None = None
 ) -> E.DecodedImage:
-    if len(image_bytes) > settings.max_image_bytes:
+    # 0 disables the byte cap (the default). `max_image_pixels`, applied inside `E.decode` below,
+    # is the guard that actually bounds what this allocates.
+    if settings.max_image_bytes and len(image_bytes) > settings.max_image_bytes:
         raise errors.FileTooLarge(
             f"Image is larger than the {settings.max_image_bytes // 1_048_576} MB limit."
         )
@@ -243,22 +245,33 @@ async def _stage1_cutout(
     pool = engines if engines is not None else registry.select_pool(settings, config.cutout)
     store = cache if (cache is not None and settings.cache_cutouts) else NullCutoutCache()
 
-    # Vendors get the original bytes when they can read them, and a PNG re-encode when they
-    # cannot. Measured: Photoroom returns a bare HTTP 400 for an EPS upload, and PSD and camera
-    # raw are the same class of problem. The mask is identical either way — it is computed from
-    # the same decoded pixels — so this only changes the container.
+    # Vendors get the original bytes when they can read them AND those bytes are small enough to
+    # send. Two independent questions that used to be one:
+    #
+    #   * **Can the vendor read this format?** `needs_reencode_for_vendor`. Photoroom returns a
+    #     bare HTTP 400 for an EPS upload; PSD and camera raw are the same class of problem.
+    #   * **Will the vendor accept this many bytes?** Nothing asked. BMP is a format Photoroom
+    #     reads perfectly well, so a 130 MB uncompressed BMP was forwarded untouched and came back
+    #     413 — and, before this, as "may succeed on retry".
+    #
+    # Re-encoding answers the size question at no cost to quality: the same 45 MP of pixels are
+    # 130 MB as a BMP and 41 MB as a PNG. Downscaling is the last resort and says so.
     #
     # The cache key deliberately keeps using the ORIGINAL bytes: identity should be "this file",
     # not "this file as we happened to re-encode it today".
     vendor_bytes = image_bytes
-    if F.needs_reencode_for_vendor(source):
-        vendor_bytes = _encode_for_vendor(decoded)
+    vendor_notes: list[Note] = []
+    if F.needs_reencode_for_vendor(source) or len(image_bytes) > settings.vendor_max_upload_bytes:
+        vendor_bytes, vendor_notes = _encode_for_vendor(decoded, settings)
 
     # Multi-object scenes: isolate the requested subject *before* segmenting, so the engine is
     # asked an answerable question. See app/engines/locate.py.
     roi, locate_notes = await _locate_subject(vendor_bytes, decoded, config, settings)
+    locate_notes = list(locate_notes) + vendor_notes
     if roi is not None:
-        results, failures = await _run_pool_on_roi(pool, decoded, roi, width, height, store)
+        results, failures = await _run_pool_on_roi(
+            pool, decoded, roi, width, height, store, settings
+        )
     else:
         results, failures = await _run_pool(
             pool, image_bytes, width, height, store, vendor_bytes=vendor_bytes
@@ -425,6 +438,7 @@ async def _run_pool_on_roi(
     width: int,
     height: int,
     store,
+    settings: Settings,
 ) -> tuple[list[AlphaResult], list[BaseException]]:
     """Segment only inside `roi`, then place the mask back at full-frame coordinates.
 
@@ -434,7 +448,10 @@ async def _run_pool_on_roi(
     full-size with zeros outside the box, which is exactly what the geometry stage already knows how
     to centre — `alpha_bbox` finds the subject and nothing else.
     """
-    crop_png = _encode_crop(decoded, roi)
+    crop_png, _downscaled = _encode_crop(decoded, roi, settings)
+    # `crop_w/crop_h` stay the ROI's true dimensions even when the upload was downscaled: they are
+    # what `_paste_alpha` places the mask back at, and `fit_alpha_to_source` has already resized
+    # the vendor's mask to them.
     crop_w, crop_h = roi.width, roi.height
 
     async def one(engine: BackgroundRemover) -> AlphaResult:
@@ -461,15 +478,67 @@ async def _run_pool_on_roi(
     )
 
 
-def _encode_crop(decoded: E.DecodedImage, roi: G.BBox) -> bytes:
+def _encode_under_budget(
+    rgb_linear: np.ndarray, settings: Settings
+) -> tuple[bytes, bool]:
+    """PNG of these pixels, small enough for a vendor to accept. Returns (bytes, downscaled).
+
+    Two steps, in this order, because only the second costs anything:
+
+    1. **Re-encode.** Lossless and usually sufficient — 45 MP is 130 MB as an uncompressed BMP and
+       41 MB as a PNG, the identical pixels either way.
+    2. **Downscale**, halving the long edge until it fits or the floor is reached. This does cost
+       mask precision, so the caller emits `Note.VENDOR_DOWNSCALED`.
+
+    Downscaling is safe to do at all only because engines return **alpha, never colour**, and
+    `base.fit_alpha_to_source` already resizes a vendor's mask back to the source dimensions —
+    written for vendors that silently cap resolution themselves, which is the same situation
+    arrived at deliberately. No output pixel is touched; the composite still uses the pipeline's
+    own full-resolution original.
+    """
+    encoded = E.encode(rgb_linear, None, fmt=OutputFormat.PNG, embed_profile=False)
+    if len(encoded) <= settings.vendor_max_upload_bytes:
+        return encoded, False
+
+    import cv2
+
+    height, width = rgb_linear.shape[:2]
+    long_edge = max(width, height)
+
+    while long_edge > settings.vendor_min_long_edge_px:
+        long_edge = max(settings.vendor_min_long_edge_px, long_edge // 2)
+        scale = long_edge / max(width, height)
+        new_w = max(1, int(round(width * scale)))
+        new_h = max(1, int(round(height * scale)))
+        small = np.stack(
+            [
+                cv2.resize(rgb_linear[..., c], (new_w, new_h), interpolation=cv2.INTER_AREA)
+                for c in range(3)
+            ],
+            axis=-1,
+        )
+        encoded = E.encode(small, None, fmt=OutputFormat.PNG, embed_profile=False)
+        if len(encoded) <= settings.vendor_max_upload_bytes:
+            return encoded, True
+
+    # Still too big at the floor. Send it and let the vendor's own 413 be the error, rather than
+    # inventing one here — a mask from anything smaller would not be usable at full resolution
+    # anyway, and the vendor's refusal is the more honest report.
+    return encoded, True
+
+
+def _encode_crop(decoded: E.DecodedImage, roi: G.BBox, settings: Settings) -> tuple[bytes, bool]:
     """PNG of just the ROI, re-encoded from the pipeline's own decoded pixels.
 
     Encoded from `rgb_linear` via the normal export path rather than from the original file bytes,
     so EXIF rotation and colour-profile normalisation that `decode` already applied are preserved —
     cropping the raw upload would reintroduce both.
+
+    Budgeted like the full frame: an ROI covering most of a 45 MP source is just as capable of
+    tripping a vendor's upload limit as the whole thing.
     """
     patch = decoded.rgb_linear[roi.y0 : roi.y1, roi.x0 : roi.x1]
-    return E.encode(patch, None, fmt=OutputFormat.PNG, embed_profile=False)
+    return _encode_under_budget(patch, settings)
 
 
 async def _multi_object_image(
@@ -590,7 +659,9 @@ async def _segment_objects(
     from app.engines.locate import GeminiLocator, locate_many
 
     width, height = decoded.source_size
-    frame_png = _encode_for_vendor(decoded)
+    # Budgeted too: the locator is a vendor call like any other, and a 45 MP frame is as likely to
+    # be refused by Gemini as by a segmentation engine.
+    frame_png, _frame_notes = _encode_for_vendor(decoded, settings)
 
     found = await locate_many(
         GeminiLocator(settings),
@@ -603,14 +674,17 @@ async def _segment_objects(
         return [], [Note.SUBJECT_NOT_FOUND], 0.0
 
     layers: list[ObjectLayer] = []
+    failures: list[BaseException] = []
     cost = 0.0
     for obj in found:
         try:
-            results, _failures = await _run_pool_on_roi(
-                pool, decoded, obj.box, width, height, store
+            results, roi_failures = await _run_pool_on_roi(
+                pool, decoded, obj.box, width, height, store, settings
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - kept, but no longer discarded
+            failures.append(exc)
             continue
+        failures.extend(roi_failures)
         if not results:
             continue
 
@@ -622,6 +696,15 @@ async def _segment_objects(
         layers.append(ObjectLayer(name=obj.label, alpha=verdict.winner.alpha))
 
     if not layers:
+        # The reason matters, and this used to throw it away. Every object failing because the
+        # vendor rate-limited us was reported as "no separable objects were found in this image" —
+        # blaming the photograph for a 429, and sending someone to look for objects that are
+        # plainly there. `_most_informative` already exists for exactly this, in `_stage1_cutout`.
+        #
+        # Rate limiting is the *expected* failure here rather than a rare one: this mode fires one
+        # segmentation call per object, so a nine-object room is a nine-call burst.
+        if failures:
+            raise _most_informative(failures)
         return [], [Note.SUBJECT_NOT_FOUND], cost
 
     return layers, [Note.MULTI_OBJECT], cost
@@ -670,19 +753,27 @@ def _fit_layers_to_canvas(
     return rgb_canvas, moved, scale
 
 
-def _encode_for_vendor(decoded: E.DecodedImage) -> bytes:
-    """Full-frame PNG for a source no segmentation vendor can read.
+def _encode_for_vendor(
+    decoded: E.DecodedImage, settings: Settings
+) -> tuple[bytes, list[Note]]:
+    """Full-frame PNG a segmentation vendor can both read and accept.
 
-    EPS, PSD and camera raw all decode fine here but are rejected upstream — an EPS upload came
-    back from Photoroom as a bare HTTP 400. Re-encoding from `rgb_linear` (rather than the original
-    bytes) keeps the EXIF rotation and profile normalisation `decode` already applied, exactly as
-    `_encode_crop` does for the ROI path.
+    Two reasons to reach here, and they are independent:
+
+    * **Format.** EPS, PSD and camera raw all decode fine but are rejected by vendors — an EPS
+      upload came back from Photoroom as a bare HTTP 400.
+    * **Size.** A format the vendor reads happily can still be too many bytes. A 130 MB BMP was
+      refused with a 413; the same pixels as PNG are 41 MB and are accepted.
+
+    Re-encoding from `rgb_linear` (rather than the original bytes) keeps the EXIF rotation and
+    profile normalisation `decode` already applied, exactly as `_encode_crop` does for the ROI path.
 
     Alpha is dropped deliberately: a PSD source can carry one, and handing a vendor a
     part-transparent image asks it to segment something already segmented. The pre-cut short
     circuit in `_stage1_cutout` has already claimed that case before this is reached.
     """
-    return E.encode(decoded.rgb_linear, None, fmt=OutputFormat.PNG, embed_profile=False)
+    encoded, downscaled = _encode_under_budget(decoded.rgb_linear, settings)
+    return encoded, [Note.VENDOR_DOWNSCALED] if downscaled else []
 
 
 def _paste_alpha(alpha_roi: np.ndarray, roi: G.BBox, width: int, height: int) -> np.ndarray:
@@ -865,6 +956,15 @@ def _resolve_formats(
             wanted.append(matched)
         if substituted:
             notes.append(Note.FORMAT_SUBSTITUTED)
+
+    if not wanted:
+        # `export.formats` may now be empty, meaning "just give me back what I uploaded". That
+        # relies on `match_source` resolving to something — and it cannot when the source format
+        # is unknown (an extension we do not recognise, which still decoded fine). Without this
+        # the image would produce only the browser preview, which is explicitly not a deliverable,
+        # so the job would "succeed" and the download bundle would be empty for that file.
+        wanted.append(F.PREVIEW_FORMAT)
+        notes.append(Note.FORMAT_SUBSTITUTED)
 
     return wanted, notes
 

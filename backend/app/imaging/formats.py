@@ -166,6 +166,31 @@ def preview_format_for(delivered: list[OutputFormat]) -> OutputFormat | None:
     return PREVIEW_FORMAT
 
 
+#: Source formats a browser can paint directly from the user's own picked `File`.
+#:
+#: The mirror of `BROWSER_RENDERABLE` for the INPUT side. `SourceFormat` is a wider set than
+#: `OutputFormat` (camera raw decodes but cannot be written), so this cannot simply reuse it.
+_RENDERABLE_SOURCES: frozenset[SourceFormat] = frozenset(
+    {
+        SourceFormat.PNG,
+        SourceFormat.JPEG,
+        SourceFormat.WEBP,
+        SourceFormat.BMP,
+    }
+)
+
+
+def is_browser_renderable_source(source: SourceFormat) -> bool:
+    """Whether the UI can show this upload without the backend rendering a thumbnail for it.
+
+    False for EPS, PSD, TIFF and every camera raw. The results page shows the user's source file
+    beside the processed output by putting it straight into an `<img>`, which is blank for all of
+    those — the same blind spot `preview_format_for` fixes on the output side. When this returns
+    False, `jobs.py` stores a small PNG of the decoded source instead.
+    """
+    return source in _RENDERABLE_SOURCES
+
+
 #: Formats a segmentation vendor will accept as an upload.
 #:
 #: The engines receive the *original file bytes*, not our decoded pixels, because a vendor's own

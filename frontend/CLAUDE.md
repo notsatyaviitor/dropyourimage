@@ -49,6 +49,28 @@ build five independent uploaders or five job types. There is one `JobConfig` and
 
 Tab order mirrors the pipeline: cut-out → background → size → centring → PSD.
 
+**Several upload requests is still one job.** A 200–400 image order is sent as one archive per ~50
+files against a single `job_id` (`createJobInBatches`), then started with `POST /jobs/{id}/start`.
+That is a transport detail, not a second job type — one `JobConfig`, one job id, one results page.
+
+## At 400 files the browser is the bottleneck, not the server
+
+Three things here scale with the file count and must not be allowed to again. All three were
+measured, not theorised:
+
+- **Never hold an object URL per picked file.** 400 URLs pin 400 blobs *and* 400 full-resolution
+  decodes — a 4000×3000 JPEG is ~48 MB decoded regardless of the 42-pixel box it is drawn in. Use
+  `useObjectUrl`, which ties the URL to the mounted component, so only rows on screen cost anything.
+- **Never render the whole list.** Both the file list and the results grid page. The results grid
+  fetches its page from `GET /jobs/{id}/images` rather than slicing the polled status.
+- **Never zip the whole selection at once.** `wrapImagesInZip` holds every file's bytes, then the
+  assembled zip, then the `File` — roughly 3× the batch. Batches are built and sent **one at a
+  time** so that peak is one batch, not the order. A parallel upload would undo this entirely.
+
+When showing counts on the results page, read them from the **job** (`status.completed`,
+`status.images_total`), never from the page of records — a page of 24 says nothing about the other
+376.
+
 ## Rules
 
 - **Never call a vendor API from the browser.** Not Photoroom, not Gemini, not Adobe. All AI goes through our
@@ -62,6 +84,10 @@ Tab order mirrors the pipeline: cut-out → background → size → centring →
   shadow cannot be preserved, say so on the image. A silent fallback reads as a bug during a demo.
 - Error states must distinguish "vendor rate-limited" from "unsupported file" from "our bug" — the API returns a
   taxonomy, so use it rather than a generic failure toast.
+- A long batch must never look hung. The upload phase reports its own progress, `rate_limit_events`
+  is surfaced as "a vendor is throttling us, the batch slowed itself down" — a slow run reported as
+  nothing at all reads as a crash — and a running job always offers Cancel. Closing the tab stops
+  nothing: the worker keeps going and keeps billing.
 
 ## Do not imply measured quality
 

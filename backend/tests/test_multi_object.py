@@ -290,3 +290,113 @@ class TestDuplicateLabels:
         entries = _parse_many(body)
         assert [e["label"] for e in entries] == ["pillow", "pillow"]
         # Disambiguation happens in locate_many; see its `used` counter.
+
+
+class TestFailureReporting:
+    """Every object failing must report *why*, not blame the photograph.
+
+    `_segment_objects` discarded the per-object failures and returned `SUBJECT_NOT_FOUND`, so a
+    vendor rate-limit surfaced as "No separable objects were found in this image" — pointing the
+    operator at a room plainly full of objects. Found on a real run when Photoroom started
+    429-ing; this mode fires one call per object, so a nine-object room is a nine-call burst and
+    rate limiting is an expected failure rather than a rare one.
+    """
+
+    class _RateLimited:
+        id = EngineId.LOCAL
+        cost_per_image_usd = 0.02
+
+        def available(self):
+            return True
+
+        async def alpha_for(self, data, width, height):
+            from app.core import errors
+
+            raise errors.VendorRateLimited("photoroom is rate-limiting requests")
+
+    class _NoForeground:
+        id = EngineId.LOCAL
+        cost_per_image_usd = 0.02
+
+        def available(self):
+            return True
+
+        async def alpha_for(self, data, width, height):
+            from app.core import errors
+
+            raise errors.NoForegroundFound("nothing to cut out")
+
+    def _config(self):
+        return JobConfig(
+            cutout=CutoutSpec(
+                strategy=EngineStrategy.SINGLE, engine=EngineId.LOCAL, multi_object=True
+            ),
+            background=BackgroundSpec(color="#FFFFFF"),
+            size=SizeSpec(width=120, height=120, margin_pct=0.0),
+            psd=PsdSpec(enabled=True),
+            export=ExportSpec(formats=[OutputFormat.PSD], match_source=False),
+        )
+
+    def _found(self, monkeypatch, n=3):
+        from app.engines.locate import Located
+
+        _stub_enumeration(monkeypatch, [
+            Located(box=BBox(5, 5, 60, 60), raw_box=BBox(5, 5, 60, 60), label=f"o{i}")
+            for i in range(n)
+        ])
+
+    async def test_a_rate_limit_is_reported_as_a_rate_limit(self, monkeypatch):
+        from app import pipeline
+        from app.imaging import export as E
+
+        self._found(monkeypatch)
+        png = E.encode(frame(100, 100), None, fmt=OutputFormat.PNG)
+        result, _ = await pipeline.process_image(
+            png, "room.png", self._config(), settings(), engines=[self._RateLimited()]
+        )
+
+        assert result.state.value == "failed"
+        assert result.error.code.value == "vendor_rate_limited"
+        assert result.error.retryable is True
+
+    async def test_a_vendor_failure_is_not_reported_as_an_empty_scene(self, monkeypatch):
+        """The exact misreport: objects were enumerated, so 'no objects found' is a lie."""
+        from app import pipeline
+        from app.imaging import export as E
+
+        self._found(monkeypatch)
+        png = E.encode(frame(100, 100), None, fmt=OutputFormat.PNG)
+        result, _ = await pipeline.process_image(
+            png, "room.png", self._config(), settings(), engines=[self._RateLimited()]
+        )
+
+        assert result.error.code.value != "no_foreground_found"
+        assert "No separable objects" not in result.error.message
+
+    async def test_a_genuine_empty_scene_still_says_so(self, monkeypatch):
+        """The honest case must survive the fix: nothing enumerated means nothing was there."""
+        from app import pipeline
+        from app.imaging import export as E
+
+        _stub_enumeration(monkeypatch, [])
+        png = E.encode(frame(100, 100), None, fmt=OutputFormat.PNG)
+        result, _ = await pipeline.process_image(
+            png, "room.png", self._config(), settings(), engines=[self._RateLimited()]
+        )
+
+        assert result.error.code.value == "no_foreground_found"
+        assert "turn it off" in result.error.message
+
+    async def test_the_most_actionable_failure_wins(self, monkeypatch):
+        """Ranked like _stage1_cutout: a rate limit outranks 'no foreground' across objects."""
+        from app import pipeline
+        from app.imaging import export as E
+
+        self._found(monkeypatch, n=2)
+        png = E.encode(frame(100, 100), None, fmt=OutputFormat.PNG)
+        result, _ = await pipeline.process_image(
+            png, "room.png", self._config(), settings(),
+            engines=[self._NoForeground(), self._RateLimited()],
+        )
+
+        assert result.error.code.value == "vendor_rate_limited"

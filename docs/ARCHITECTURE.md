@@ -40,8 +40,10 @@ is built from the same pre-composite layers (`app/imaging/geometry.py`'s `Placem
 app/core/        settings (env-driven), typed error taxonomy, job store abstraction
 app/models.py    the frozen contract
 app/imaging/     PURE FUNCTIONS. color, geometry, composite, shadow, export, icc — no I/O, no network
-app/engines/     segmentation adapters (base/local/http), auto-pick scoring, vision tie-break, registry
-app/ingest/      safe zip extraction — the untrusted-input boundary
+app/engines/     segmentation adapters (base/local/http), auto-pick scoring, vision tie-break,
+                 registry, per-vendor adaptive throttle
+app/ingest/      safe zip extraction — the untrusted-input boundary. Two ways in (whole-archive
+                 and streaming), one set of guards
 app/psd/         fallback writer, vector path encoder, validator, Adobe API client (unverified)
 app/storage/     object storage behind a Protocol — memory (tests/dev) or S3/MinIO
 app/pipeline.py  the five stages, composed
@@ -61,9 +63,41 @@ about 5 seconds with no API keys, no Redis, and no MinIO.
 | Trigger | `REDIS_URL`/`S3_ENDPOINT_URL` unset or `memory` (the default, and always true under `pytest`) | Real Redis + MinIO/S3 configured |
 | `POST /jobs` | Runs the job inline, synchronously, in the request handler | Enqueues via RQ; a separate `rq worker` process runs it |
 | Storage | In-process dict | S3-compatible object storage, signed URLs |
+| Bulk | Refused above `INLINE_JOB_MAX_IMAGES` (25) — a blocking POST cannot span a job that takes minutes | Required for 200–400 image orders |
 
 `JobCreated.state` is always `"queued"` in the response regardless of mode — it describes request
 acceptance, not a live snapshot. Poll `GET /jobs/{id}` for the real state in both modes.
+
+## Bulk: what changes at 400 images
+
+The original shape — one archive, everything in memory, a status write per image — was right for
+the twenty-image case and fails in four independent ways at batch scale. Each is fixed at its own
+layer; they only make sense together.
+
+```
+browser     one zip per ~50 files, sent sequentially, buffers released between batches
+            (peak was ~3x the whole selection: files + zip + File)
+routes      POST /jobs takes an optional job_id and start flag; job-level caps on top of
+            the per-archive ones
+zip_reader  plan_entries (<=4 KB per entry) + read_entry, so entry bytes are never all
+            resident — measured 1 MB vs 317 MB on 60 photos
+jobs.py     one archive open at a time; coalesced status writes; a stop signal for cancel
+            and the spend ceiling; bundle assembled through a temp file
+engines     per-vendor adaptive throttle, so one 429 slows the whole job on that vendor
+```
+
+Two of these are worth knowing about before touching them:
+
+**`OutputAsset.url` is minted on read, not on write.** The signed-URL TTL is 15 minutes; a
+400-image job is not. Assets carry a storage `key` and every read path re-signs from it. Do not
+reintroduce a URL stored at write time.
+
+**The throttle is a contextvar, and per vendor.** It has to be visible at the vendor call site five
+frames below `jobs.py`, behind the engine Protocol — threading it through would put a
+rate-limiting parameter into `BackgroundRemover.alpha_for`. It is keyed per vendor because
+Photoroom exhausting its quota says nothing about fal.ai's: one shared governor would halve
+throughput on a healthy vendor exactly when the job needs it to take up the slack. See
+`app/engines/throttle.py`.
 
 ## Frontend
 

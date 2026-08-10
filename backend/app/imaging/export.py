@@ -315,3 +315,53 @@ def dimensions_of(data: bytes) -> tuple[int, int]:
     """Read (width, height) without decoding pixels — used for cheap output metadata."""
     with Image.open(io.BytesIO(data)) as img:
         return img.width, img.height
+
+
+#: Long edge of the "before" thumbnail. The side-by-side panel renders at roughly 370 CSS px, so
+#: this covers a 2x display with room to spare while costing a few tens of KB rather than the tens
+#: of megabytes a full-resolution re-encode would.
+SOURCE_THUMBNAIL_LONG_EDGE = 768
+
+
+def source_thumbnail(
+    data: bytes,
+    *,
+    max_pixels: int | None = None,
+    source: SourceFormat | None = None,
+    long_edge: int = SOURCE_THUMBNAIL_LONG_EDGE,
+) -> bytes:
+    """A small PNG of a file *as it was uploaded*, for the UI's "before" panel.
+
+    **No browser renders EPS, PSD, TIFF or camera raw.** `preview_format` already solves that for
+    delivered outputs, but the before/after row shows the user's *source* file, which the browser
+    was being asked to decode directly — so every PSD and EPS upload rendered an empty box next to
+    a correct "after". The comparison is the whole point of that row, and for this client's
+    material (132 PSDs) it was blank every time.
+
+    Deliberately **not** run for formats a browser can already paint: those use the local `File`
+    the user picked, which costs nothing, needs no round trip and is full resolution.
+
+    Alpha is flattened onto white rather than preserved. This is a "what you uploaded" reference
+    image, and a checkerboard here would be confused with the transparency the *output* panel next
+    to it is genuinely showing.
+    """
+    import cv2
+
+    decoded = decode(data, max_pixels=max_pixels, source=source)
+    rgb = decoded.rgb_linear
+
+    if decoded.alpha is not None:
+        white = np.ones_like(rgb)
+        rgb = rgb * decoded.alpha[..., None] + white * (1.0 - decoded.alpha[..., None])
+
+    height, width = rgb.shape[:2]
+    scale = min(1.0, long_edge / max(width, height))
+    if scale < 1.0:
+        new_w = max(1, int(round(width * scale)))
+        new_h = max(1, int(round(height * scale)))
+        rgb = np.stack(
+            [cv2.resize(rgb[..., c], (new_w, new_h), interpolation=cv2.INTER_AREA) for c in range(3)],
+            axis=-1,
+        )
+
+    return encode(rgb, None, fmt=OutputFormat.PNG, embed_profile=False)

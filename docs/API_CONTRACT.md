@@ -9,12 +9,94 @@ changes, update both plus this doc in the same change.
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/jobs` | Upload a zip + `JobConfig` JSON, get a `JobCreated` |
+| `POST` | `/jobs/{job_id}/start` | Run a job whose batches were uploaded with `start=false` |
+| `POST` | `/jobs/{job_id}/cancel` | Ask a running job to stop after its in-flight images |
+| `POST` | `/jobs/estimate` | Estimated vendor spend for a batch of a given size |
 | `GET` | `/jobs/{job_id}` | Poll for `JobStatus` |
+| `GET` | `/jobs/{job_id}/images` | One page of `ImageResult`s |
 | `GET` | `/objects/{key}` | Memory-mode asset passthrough (S3 mode uses presigned URLs directly) |
 | `GET` | `/health` | Redacted config snapshot — no secrets, ever |
 
 `POST /jobs` takes `multipart/form-data`: a `file` field (the zip) and a `config` field (JobConfig
 as a JSON string). Invalid config is a `422` with FastAPI's validation error list.
+
+## Bulk: 200–400 images in one order
+
+A single archive does not scale to a large order, and **the binding constraint is the browser, not
+the network**: zipping client-side holds every file's bytes, then the assembled zip, then the
+`File` — roughly three times the total — before a byte is sent. At 400 photos the tab dies first.
+
+So `POST /jobs` takes two optional extra form fields, and today's single-shot call is unchanged:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `job_id` | `str \| null` | `null` | Append this archive to an existing job instead of creating one |
+| `start` | `bool` | `true` | Run the job once this archive is stored |
+
+```
+POST /jobs        config + batch 1, start=false   -> {job_id, batches: 1, accepting_uploads: true}
+POST /jobs        job_id + batch 2, start=false   -> {batches: 2, accepting_uploads: true}
+...
+POST /jobs/{id}/start                             -> {accepting_uploads: false}
+```
+
+Rules that matter:
+
+- **`start=true` (the default) means one POST still creates, runs and returns**, exactly as before.
+- The config is stored with the **first** batch and later batches cannot change it. One job is one
+  `JobConfig`; letting batch 5 alter the background colour would deliver an order whose images
+  disagree with each other, with no record of which setting produced which file.
+- Every batch is screened by the full set of archive guards independently. Being the second batch
+  of an accepted job confers no trust.
+- Appending to a job that has already started is a **409**.
+- The last batch does not start the job — `/start` does. Starting on the final upload would race a
+  batch that failed and is being retried.
+
+**Job-level caps** sit on top of the per-archive ones, because N uploads against one job id would
+otherwise multiply straight through them: `MAX_JOB_IMAGES` (500) and `MAX_JOB_UPLOAD_BYTES` (4 GB),
+both **413** with `batch_too_large`.
+
+**Memory mode refuses bulk.** With no Redis configured, jobs run inline inside the POST handler —
+fine for a handful of images, a guaranteed timeout for hundreds. Above `INLINE_JOB_MAX_IMAGES` (25)
+the request is a **503** with `bulk_requires_worker`, naming the fix. Start Redis and an
+`rq worker`; see `docs/SETUP.md`.
+
+`GET /health` publishes the real limits under `config.limits`, so a client sizes its batches from
+the server rather than a hardcoded copy that drifts:
+
+```json
+{"max_batch_images": 200, "max_batch_bytes": 524288000, "max_job_images": 500,
+ "inline_max_images": 25, "bulk_enabled": false, "max_job_cost_usd": 25.0}
+```
+
+### Cost guard rails
+
+`POST /jobs/estimate` (`config` + `images`) returns a `CostEstimate`. **Every figure is an
+estimate** — per-engine list prices, not invoices, and the real total moves with cache hits and
+retries. It exists so a 400-image click is an informed one, and is never a price to a customer.
+`per_object_pricing` marks the multi-object case, where cost is per *object* and the object count
+is unknowable in advance, so the figure is a floor rather than a total.
+
+`MAX_JOB_COST_USD` (default $25) stops a job that reaches it; whatever finished is kept and
+downloadable, and the remainder is `SKIPPED` with `budget_exceeded`. Each image reserves its
+projected cost before starting, so the ceiling binds on *spent + in flight* — comparing spend
+alone let a whole concurrency window overshoot it.
+
+`POST /jobs/{id}/cancel` sets `JobState.CANCELLED`'s trigger. It returns the current status and
+does **not** flip the state itself: the worker owns that transition, and claiming it up front would
+report a stop that has not happened while images are still billing. Poll for the real state.
+Images already finished stay downloadable — a cancel is "stop spending", not "discard what I paid
+for" — and each unprocessed image is recorded **by name** with `job_cancelled`, because the next
+question is "which ones do I still need?". Idempotent, and accepted on a terminal job.
+
+### Polling a large job
+
+`GET /jobs/{id}?include_images=false` omits the per-image records. They are the entire payload —
+measured **231× smaller** on a 180-image job — and the progress UI reads none of them. Counts stay
+accurate either way; `images_total` reports how many records exist.
+
+`GET /jobs/{id}/images?offset=&limit=` (limit 1–200, default 50) returns an `ImagePage` with fresh
+signed URLs for that page only.
 
 ## `JobConfig` — one field group per UI tab
 
@@ -60,11 +142,22 @@ comparison.
 JobStatus
 ├── state          queued | running | completed | failed | cancelled
 ├── total / completed / failed
-├── images[]        one ImageResult per file in the archive
+├── images[]        one ImageResult per file — EMPTY when polled with include_images=false
+├── images_total     how many records exist, regardless of how many `images` carries
 ├── cost_usd         running vendor spend for the whole job
 ├── bundle_url       signed zip of every output, once state is COMPLETED
+├── bundle_key       storage key behind it; the URL is re-signed on every read
+├── batches          upload archives accepted (1 for an ordinary single-zip job)
+├── upload_bytes     accumulated archive size, against MAX_JOB_UPLOAD_BYTES
+├── accepting_uploads  true between the first batch and /start — the job is a draft
+├── rate_limit_events  times a vendor throttled us; explains a slow batch honestly
 └── error            only set if the JOB itself failed (bad archive) — not per-image failures
 ```
+
+A cancelled or budget-stopped job that produced **any** output reports `completed`, not
+`cancelled`: the assets exist and are downloadable, and reporting the whole job as cancelled would
+imply nothing came back. The per-image `SKIPPED` records carry the reason. `cancelled` is reserved
+for a job that stopped before anything finished.
 
 `state == "completed"` means every image reached a terminal state, **not** that every image
 succeeded — check `images[].state` for per-image outcomes. A job only fails outright when nothing
@@ -81,8 +174,23 @@ ImageResult
 ├── chosen_engine       which segmentation engine won, if auto-pick ran
 ├── candidates[]        every engine tried, with scores/rejection reasons — for side-by-side review
 ├── centroid_offset_px  measured, not assumed — how far off canvas-centre the product landed
-└── background_uniformity   drives the shadow-preservation gate; reported even when it fails
+├── background_uniformity   drives the shadow-preservation gate; reported even when it fails
+└── source_preview_url  small PNG of the file AS UPLOADED, for the "before" panel — see below
 ```
+
+### `source_preview_url` — the input-side counterpart of `preview_format`
+
+`preview_format` exists because no browser renders TIFF, EPS or PSD, so a job delivering only
+those painted an empty results card. The **before/after row has the same problem from the other
+end**: it shows the user's *source* file, handed straight to an `<img>` that cannot decode it. Every
+PSD and EPS upload rendered a blank "before" beside a correct "after".
+
+So when the source format is one a browser cannot paint, the backend stores a small PNG of the
+decoded source (768 px long edge) and names it here. It is `null` for `png`, `jpeg`, `bmp` and
+`webp` — the client already holds those files locally, which is free, instant and full resolution.
+
+Like `preview_format`, it is **not a deliverable**: it lives outside `outputs`, is excluded from the
+download bundle, and is re-signed on read like every other asset.
 
 ### Notes — every one means "we did something other than literally what you asked"
 
@@ -104,6 +212,7 @@ The frontend renders every one of these; never swallow one silently (see `fronte
 | `subject_not_found` | Subject prompt matched nothing — whole frame segmented, very likely the wrong object |
 | `busy_scene` | Backdrop is not a uniform studio sweep; the cut-out may be of the wrong object |
 | `hard_edged_mask` | Cut out by an engine that returns a boundary, not a coverage field — no soft alpha, so edge decontamination had nothing to correct. Emitted for `gemini` |
+| `vendor_downscaled` | Too large to send the vendor at full resolution, so the mask was computed on a reduced copy and scaled back up. **Only mask precision is affected** — engines return alpha, never colour, and the composite uses the full-resolution original — but edges are softer. Only emitted when a lossless re-encode was not enough on its own |
 | `multi_object` | The scene was split into one PSD layer per object; `ImageResult.layers` names them |
 | `format_substituted` | `match_source` was asked for but the source format cannot be written; delivered as 16-bit TIFF. Emitted for camera raw |
 
@@ -146,8 +255,26 @@ Viewable formats: `png` · `jpeg` · `webp` · `bmp`.
 `png` · `jpeg` · `tiff` · `webp` · `bmp` · `eps` · `psd`
 
 **`export.match_source`** (default `true`) additionally delivers each image in the format it
-arrived as, unioned with `export.formats`. A PNG in gives a PNG out; a TIFF a TIFF. Set it `false`
-for one fixed format across a mixed batch.
+arrived as, unioned with `export.formats`. A PNG in gives a PNG out; a TIFF a TIFF.
+
+The delivered set is the **union** of the two fields, which gives three modes:
+
+| `formats` | `match_source` | Delivered, for a mixed batch of 7 |
+|---|---|---|
+| `[]` | `true` | **one file per upload, each in its own format** — 7 files |
+| `["png"]` (default) | `true` | the source format *and* a PNG — 13 files |
+| `["png"]` | `false` | one fixed format for everything — 7 PNGs |
+
+`formats` may be **empty only when `match_source` is true**. That combination is how you ask for
+"give me back exactly what I uploaded and nothing else"; it was previously impossible, because
+`formats` required at least one entry, so every image collected an extra file nobody asked for —
+a PNG beside every PSD, turning a 132-image order into 264 files. Empty *and* `match_source:false`
+is a `422`, since it asks for no output at all.
+
+Two things still hold in the empty case: a job delivering only non-viewable formats still gets a
+`preview_format` so the results grid has something to paint (excluded from the bundle as always),
+and a source whose extension is unrecognised falls back to PNG with `format_substituted` rather
+than delivering nothing.
 
 **Camera raw cannot be written, ever.** `crw`/`cr2`/`cr3`/`dng`/`nef`/`raw` are undemosaiced sensor
 data plus proprietary maker notes; no encoder exists in any library because the format cannot
@@ -173,13 +300,41 @@ are restored — but it is not offered in the UI and nothing selects it by defau
 ### Error taxonomy
 
 Every failure carries a typed `ErrorCode` — `vendor_rate_limited`, `vendor_timeout`,
-`vendor_unauthorized`, `vendor_out_of_credits`, `no_foreground_found`, `vendor_error`,
+`vendor_unauthorized`, `vendor_out_of_credits`, `vendor_payload_too_large`,
+`no_foreground_found`, `vendor_error`,
 `unsupported_file`,
 `file_too_large`, `output_too_large`,
-`malicious_archive`, `image_decode_failed`, `psd_unavailable`, `internal_error` — plus a
+`malicious_archive`, `image_decode_failed`, `psd_unavailable`,
+`batch_too_large`, `bulk_requires_worker`, `budget_exceeded`, `job_cancelled`,
+`internal_error` — plus a
 `retryable` flag. The point of
 this list existing at all: "the vendor throttled us" must never render the same as "your file is
 broken" or "we have a bug."
+
+The four bulk codes keep that separation at batch scale. `batch_too_large` is a legitimate upload
+with too much in it, not a hostile archive — a user shown `malicious_archive` for a 600-image order
+learns the wrong thing. `bulk_requires_worker` is a deployment gap with a named fix, not a fault in
+the request. `budget_exceeded` and `job_cancelled` are deliberate stops, and the images behind them
+are still there.
+
+`vendor_payload_too_large` (HTTP 413 from a vendor) exists mainly to be **non-retryable**. Falling
+through to the generic `vendor_error` marked it retryable, so the UI offered "may succeed on
+retry" for a request that re-sends byte-identical content — burning the retry budget to collect
+the same refusal. Same reasoning as `no_foreground_found`.
+
+Reaching it at all now means `VENDOR_MAX_UPLOAD_BYTES` is too generous for that vendor, which is a
+configuration answer rather than a retry: the pipeline sizes the payload before sending, because
+"can the vendor read this format" and "will the vendor accept this many bytes" are different
+questions. BMP is a format Photoroom reads happily, and a 130 MB uncompressed BMP was still
+refused; the identical pixels as PNG are 41 MB and are accepted.
+
+### `OutputAsset.url` is minted on read
+
+Assets carry a storage `key`, and `url` is signed from it when the record is **read** — not when
+the asset was written. `SIGNED_URL_TTL_SECONDS` is 15 minutes and a 400-image job is not, so a URL
+frozen at write time was already dead by the time the results page rendered. Every read path
+(`GET /jobs/{id}`, `GET /jobs/{id}/images`, `cancel`) re-signs, so a URL is always fresh from the
+response that carried it and the TTL stays short. Never cache one past the response it came in.
 
 ## Versioning
 

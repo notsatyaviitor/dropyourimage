@@ -284,6 +284,10 @@
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
+  /* Cards size to their own content instead of stretching to the tallest in the row. With the
+     long help text gone, the columns differ a lot in height, and stretching left large empty
+     panels under Clipping and Background that read as "something failed to load". */
+  align-items: start;
 }
 
 .service-row {
@@ -585,7 +589,9 @@
   font-size: 11px; font-weight: 700; margin-bottom: 14px; color: var(--muted);
   letter-spacing: .08em; text-transform: uppercase;
 }
-.ba-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+/* Same reasoning as .result-grid — a single before/after pair should not leave three empty
+   columns beside it. */
+.ba-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
 
 .ba-card {
   background: var(--card-bg); border: 1px solid var(--border);
@@ -865,18 +871,23 @@
 .filter-hint { margin-left: auto; font-size: 12px; color: var(--light); font-style: italic; }
 
 /* ── Result grid (inside batch section) ─────────── */
+/* Fluid, not a fixed four columns.
+   `repeat(4, 1fr)` with one result gave one card and three empty columns — a lone panel against a
+   large white void that reads as a half-rendered page. It also fixed the card width to a quarter of
+   the viewport, so on a wide screen a single result rendered an enormous image. auto-fill sizes to
+   the content and fills whatever room there is. */
 .result-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
   padding: 4px 0;
 }
 .result-card {
   background: var(--card-bg); position: relative;
-  border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
   transition: background .15s, box-shadow .15s;
 }
-.result-card:hover { background: var(--menu-hover); }
-.result-card:nth-child(4n) { border-right: none; }
-.result-card:hover { background: var(--menu-hover); }
+.result-card:hover { background: var(--menu-hover); box-shadow: 0 4px 12px rgba(21,35,57,.06); }
 
 .result-card-status-badge {
   position: absolute; top: 10px; left: 10px; z-index: 2;
@@ -1064,16 +1075,21 @@
   margin: 6px 0 0; font-size: 10px; line-height: 1.45; color: var(--muted);
   text-align: left; font-style: italic;
 }
-.res-notes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.res-notes { display: flex; flex-wrap: wrap; gap: 4px; }
 .res-note-chip {
   font-size: 9.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
   padding: 2px 6px; border-radius: 3px; background: #fdf6e3; color: #8a6d1f;
   border: 1px solid #f0e0b8; cursor: help;
 }
-.res-meta { margin-top: 8px; font-size: 10.5px; line-height: 1.6; color: var(--muted); text-align: left; }
+/* Rows, not <br />-separated runs: each fact gets its own line box, so they align on the left
+   edge and space evenly instead of collapsing into one dense paragraph. */
+.res-meta { display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; line-height: 1.5; color: var(--muted); text-align: left; }
+.res-meta-row { overflow-wrap: anywhere; }
 .res-meta strong { color: var(--text); font-weight: 600; }
 .res-meta-warn { color: #a06a12; font-weight: 600; }
-.res-fmt-links { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+.res-meta details > summary { cursor: pointer; margin-top: 2px; }
+.res-fmt-links { display: flex; gap: 5px; flex-wrap: wrap; }
 .res-fmt-link {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 7px; border-radius: 4px; border: 1px solid var(--border);
@@ -1120,3 +1136,149 @@
   color: var(--muted); cursor: pointer; padding: 2px 6px;
 }
 .zoom-close:hover { color: var(--text); }
+
+/* ── Bulk upload (200-400 images) ────────────────────────────
+   Everything here exists because a large batch changes what the page has to say, not just how
+   much of it there is: pagination controls, an upload phase distinct from processing, an
+   explicit spend confirmation, and a cancel. */
+
+.dz-bulk { margin-top: 6px; font-size: 11px; color: var(--light); }
+
+/* Placeholder while a row's object URL is being created. Sized identically to .file-thumb so the
+   list does not reflow as thumbnails resolve — at 50 rows a paging jump would be very visible. */
+.file-thumb-empty { background: var(--menu-hover); }
+
+.file-pager, .result-pager {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 14px; font-size: 12.5px; color: var(--muted);
+}
+.file-pager button, .result-pager button {
+  background: #fff; border: 1px solid var(--border); border-radius: 2px;
+  padding: 6px 14px; font-size: 12.5px; font-weight: 600; color: var(--navy);
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.file-pager button:hover:not(:disabled),
+.result-pager button:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+.file-pager button:disabled, .result-pager button:disabled {
+  opacity: .45; cursor: not-allowed;
+}
+.result-pager { margin-top: 20px; }
+
+/* Estimated vendor spend. Neutral by default, warning only when it crosses the server ceiling —
+   this is our API cost, not a customer price, and it must never read as a quote. */
+.cost-panel {
+  margin-top: 14px; padding: 12px; border-radius: 8px;
+  background: var(--menu-hover); border: 1px solid var(--border);
+}
+.cost-panel.over { border-color: #e0a800; background: #fdf8e8; }
+.cost-note { margin: 8px 0 0; font-size: 10.5px; line-height: 1.55; color: var(--muted); }
+.cost-note.over { color: #8a6100; }
+.cost-confirm {
+  display: flex; align-items: flex-start; gap: 8px; margin-top: 10px;
+  font-size: 11px; line-height: 1.5; color: var(--text); cursor: pointer;
+}
+.cost-confirm input { margin-top: 2px; flex-shrink: 0; accent-color: var(--green); }
+
+.proc-prog-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.proc-cancel-btn {
+  background: #fff; border: 1px solid #d9b3b3; border-radius: 2px;
+  padding: 6px 14px; font-size: 12px; font-weight: 600; color: #c0392b;
+  cursor: pointer; white-space: nowrap; transition: background .15s;
+}
+.proc-cancel-btn:hover:not(:disabled) { background: #fdf0ef; }
+.proc-cancel-btn:disabled { opacity: .55; cursor: not-allowed; }
+.proc-cancel-note { margin-top: 8px; font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+
+/* Vendor throttling is expected at this batch size and is not our failure. Amber, not red: the
+   job is still running and nothing has been lost. */
+.proc-throttle-note {
+  margin-top: 12px; padding: 8px 10px; border-radius: 6px;
+  background: #fdf8e8; border: 1px solid #e8d9a0;
+  font-size: 11px; line-height: 1.5; color: #8a6100; text-align: left;
+}
+.res-note-banner {
+  margin: 0 0 18px; padding: 11px 14px; border-radius: 8px;
+  background: #fdf8e8; border: 1px solid #e8d9a0;
+  font-size: 12.5px; line-height: 1.55; color: #8a6100;
+}
+.ba-section-note { font-weight: 400; color: var(--muted); }
+
+/* The specific rejection reason, under the error category. The category alone ("File exceeds the
+   size limit") does not tell you WHICH limit or by how much — that is what this line carries. */
+.res-error-detail {
+  display: block; margin-top: 4px; font-size: 11px; line-height: 1.5;
+  color: var(--muted); font-weight: 400;
+}
+
+/* Format badge where a thumbnail cannot exist. A PSD or EPS in an <img> is a blank box, so the
+   extension is shown instead — the same "say which it is" principle as the results grid's
+   "no viewable output". */
+.file-thumb-empty {
+  display: flex; align-items: center; justify-content: center;
+}
+.file-thumb-ext {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em; color: var(--muted);
+}
+
+/* "none; delivering the uploaded format only" — a legitimate state, not an error, so it reads as
+   an explanation rather than a warning. */
+.opt-sublabel-note { font-weight: 400; color: var(--muted); font-size: 11px; }
+
+/* ── Specification: progressive disclosure ──────────────────
+   The page had five cards, seventeen controls and twelve paragraphs of rationale at equal visual
+   weight, so the three settings anyone actually changes were buried. Nothing was deleted — the
+   defaults fold into <details>, the prose hides behind one switch, and consequences stay put. */
+
+.ptrow-right { display: flex; align-items: center; gap: 16px; }
+
+.explain-switch {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; color: var(--muted); cursor: pointer; user-select: none;
+}
+.explain-switch input { accent-color: var(--green); cursor: pointer; }
+
+.opt-advanced { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.opt-advanced > summary {
+  cursor: pointer; list-style: none;
+  font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); padding: 2px 0; transition: color .15s;
+}
+.opt-advanced > summary::-webkit-details-marker { display: none; }
+.opt-advanced > summary::before {
+  content: '▸'; display: inline-block; margin-right: 6px; transition: transform .15s;
+}
+.opt-advanced[open] > summary::before { transform: rotate(90deg); }
+.opt-advanced > summary:hover { color: var(--green); }
+.opt-advanced-body { padding-top: 4px; }
+
+/* A consequence of the current settings — quieter than an error, louder than help text, and
+   never hidden by the Explain switch. */
+.opt-note {
+  margin: 8px 0 0; padding: 7px 9px; border-radius: 6px;
+  background: var(--menu-hover); border: 1px solid var(--border);
+  font-size: 11px; line-height: 1.5; color: var(--text);
+}
+.opt-note-warn { background: #fdf8e8; border-color: #e8d9a0; color: #8a6100; }
+
+/* Per-file upload state. "Ready" for the whole upload told the user nothing while their own
+   bytes were on the wire. */
+.file-status { display: flex; align-items: center; gap: 6px; }
+.file-status-waiting  { color: var(--light); }
+.file-status-uploading { color: var(--navy); font-weight: 600; }
+.file-status-uploaded { color: var(--green); font-weight: 600; }
+.file-status-spinner {
+  width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0;
+  border: 2px solid var(--border); border-top-color: var(--green);
+  animation: file-spin .7s linear infinite;
+}
+@keyframes file-spin { to { transform: rotate(360deg); } }
+
+/* The card's lower half. These blocks used to be direct children of .result-card, which has no
+   padding — so chips, download links and metadata sat flush against the card edge while the
+   filename above them was inset by 16px. One padded, gap-spaced column aligns them all and
+   replaces six competing margin-tops. */
+.result-card-body {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 16px 14px;
+}
+.result-card-body:empty { display: none; }

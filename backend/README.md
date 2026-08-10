@@ -12,7 +12,7 @@ root [`CLAUDE.md`](../CLAUDE.md) for why that split is non-negotiable, and
 ```bash
 cd backend && ./scripts/setup.sh      # creates .venv, installs requirements.txt, verifies imports
 source .venv/bin/activate             # ALWAYS. Never use the system python3 — it is apt-managed
-pytest                                # 582 passed, 0 skipped — no API keys, no images needed
+pytest                                # 652 passed, 0 skipped — no API keys, no images needed
 ```
 
 `scripts/setup.sh` is idempotent; re-run it after a `requirements.txt` change.

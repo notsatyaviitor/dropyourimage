@@ -140,10 +140,21 @@ class TestZipBombGuards:
             zip_reader.read_images(oversized, settings)
 
     def test_per_image_size_cap_is_enforced(self, settings):
+        from app.models import ErrorCode
+
         data = make_zip({"huge.png": b"\xff" * (settings.max_image_bytes + 1)})
         entries, rejections = zip_reader.read_images(data, settings)
         assert entries == []
-        assert rejections and "MB per-image limit" in rejections[0].reason
+        assert rejections and "per-image limit" in rejections[0].reason
+
+        # The reason names both numbers. "File exceeds the size limit" on its own does not say
+        # which limit or by how much, which is exactly how a 130 MB PSD became a mystery.
+        assert "5 MB" in rejections[0].reason and "4 MB" in rejections[0].reason
+
+        # And it is FILE_TOO_LARGE, not UNSUPPORTED_FILE. A supported format that is merely too
+        # big must not be reported as a format problem — that sends someone converting a file
+        # whose format was never the issue.
+        assert rejections[0].code is ErrorCode.FILE_TOO_LARGE
 
     def test_a_forged_central_directory_size_is_neutralised(self, settings):
         """Defence in depth against a crafted zip whose central directory understates an entry's

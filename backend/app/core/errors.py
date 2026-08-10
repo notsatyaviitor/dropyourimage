@@ -74,6 +74,23 @@ class VendorOutOfCredits(PipelineError):
     retryable = False
 
 
+class VendorPayloadTooLarge(PipelineError):
+    """The vendor refused the upload as too large (HTTP 413).
+
+    **Not retryable, and that is the whole point of it existing.** Falling through to the generic
+    `VendorError` marked it retryable, so the UI offered "may succeed on retry" for a request that
+    will send byte-identical content every time — it burns the retry budget and the demo's clock to
+    arrive at the same 413. Same reasoning as `NoForegroundFound`.
+
+    Measured: a 130 MB BMP sent to Photoroom as-is. The fix is upstream — `pipeline` now sizes the
+    vendor payload before sending — so reaching this error means the budget is still too generous
+    for that vendor, which is a configuration answer (`VENDOR_MAX_UPLOAD_BYTES`), not a retry.
+    """
+
+    code = ErrorCode.VENDOR_PAYLOAD_TOO_LARGE
+    retryable = False
+
+
 class NoForegroundFound(PipelineError):
     """The engine could not identify anything to cut out.
 
@@ -125,6 +142,48 @@ class OutputTooLarge(PipelineError):
     """The requested output canvas exceeds this deployment's pixel budget."""
 
     code = ErrorCode.OUTPUT_TOO_LARGE
+
+
+class BatchTooLarge(PipelineError):
+    """The job as a whole exceeds the image-count or upload-size cap.
+
+    Distinct from `FileTooLarge` and `MaliciousArchive` because the fix is different and the blame
+    is different: nothing here is malformed or hostile, there is simply too much of it. A user who
+    sees "malicious archive" for a legitimate 600-image upload learns the wrong thing.
+    """
+
+    code = ErrorCode.BATCH_TOO_LARGE
+
+
+# --- capacity ---------------------------------------------------------------
+
+
+class BulkRequiresWorker(PipelineError):
+    """Too many images to process inline; this deployment has no queue configured.
+
+    Memory mode runs a job synchronously inside the POST handler (see `app/api/routes.py`), which
+    is fine for the handful of images a first run or a test uses and impossible for hundreds: the
+    request would block for minutes to tens of minutes and time out with a half-finished job
+    behind it. Refusing up front, with the fix named, beats a timeout that looks like a crash.
+    """
+
+    code = ErrorCode.BULK_REQUIRES_WORKER
+
+
+class BudgetExceeded(PipelineError):
+    """The job reached its vendor-spend ceiling and stopped.
+
+    Not retryable in the sense the flag means — retrying the same job spends the same money again.
+    Whatever finished before the ceiling is kept and downloadable; only the remainder is skipped.
+    """
+
+    code = ErrorCode.BUDGET_EXCEEDED
+
+
+class JobCancelled(PipelineError):
+    """The operator cancelled the job; the remaining images were not processed."""
+
+    code = ErrorCode.JOB_CANCELLED
 
 
 # --- feature availability ---------------------------------------------------

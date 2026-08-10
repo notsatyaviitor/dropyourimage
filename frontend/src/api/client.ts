@@ -1,4 +1,13 @@
-import type { JobConfig, JobCreated, JobStatus } from './types'
+import type {
+  CostEstimate,
+  ImagePage,
+  JobConfig,
+  JobCreated,
+  JobStatus,
+  ServerLimits,
+} from './types'
+import { FALLBACK_LIMITS } from './types'
+import { wrapImagesInZip } from '@/lib/zip'
 
 /**
  * All requests go through /api, proxied to the backend by Vite in dev (vite.config.ts) and by
@@ -41,7 +50,181 @@ export async function createJob(file: File, config: JobConfig): Promise<JobCreat
   body.set('file', file)
   body.set('config', JSON.stringify(config))
 
-  const res = await fetch(`${API_BASE}/jobs`, { method: 'POST', body })
+  return post<JobCreated>('/jobs', body)
+}
+
+/**
+ * Batch size, in **bytes** — not in files.
+ *
+ * A count is the wrong unit and the client's own test set proves it: 132 PSDs of 130 MB each. At
+ * 50 files per batch that is a 6.5 GB archive built in the tab, which does not survive; at the
+ * same 50 for 200 KB JPEGs it is 10 MB and wastefully chatty. The count says nothing about the
+ * cost, so the cost is what gets measured.
+ *
+ * 256 MB targets a peak near 500 MB (`wrapImagesInZip` holds the batch plus the zip parts) and
+ * lands on 2 PSDs or ~1200 ordinary JPEGs per request — both reasonable.
+ */
+export const UPLOAD_BATCH_BYTES = 256 * 1024 * 1024
+
+/**
+ * Secondary cap, so a batch of thousands of tiny files does not exceed the server's per-archive
+ * entry limit while sitting well under the byte budget.
+ */
+export const UPLOAD_BATCH_SIZE = 50
+
+/**
+ * Split a selection into batches that fit both budgets.
+ *
+ * A single file larger than the whole byte budget still gets its own batch rather than being
+ * dropped — the server's `max_image_bytes` is what decides whether it is acceptable, and it can
+ * say so with a real reason. Silently discarding it here would be the worst of both.
+ */
+export function planUploadBatches(
+  files: File[],
+  byteBudget = UPLOAD_BATCH_BYTES,
+  countBudget = UPLOAD_BATCH_SIZE,
+): File[][] {
+  // A server limit of 0 means "no limit", and callers pass `Math.min(serverLimit, ours)` — which
+  // yields 0 and would put every file in its own batch. Our own budget is a browser-memory
+  // heuristic and applies regardless of what the server permits, so fall back to it.
+  if (byteBudget <= 0) byteBudget = UPLOAD_BATCH_BYTES
+  if (countBudget <= 0) countBudget = UPLOAD_BATCH_SIZE
+
+  const batches: File[][] = []
+  let current: File[] = []
+  let bytes = 0
+
+  for (const file of files) {
+    const wouldExceed = current.length > 0 && (bytes + file.size > byteBudget || current.length >= countBudget)
+    if (wouldExceed) {
+      batches.push(current)
+      current = []
+      bytes = 0
+    }
+    current.push(file)
+    bytes += file.size
+  }
+
+  if (current.length > 0) batches.push(current)
+  return batches
+}
+
+export interface UploadProgress {
+  batch: number
+  batches: number
+  imagesSent: number
+  imagesTotal: number
+}
+
+/**
+ * Upload a whole selection as one job, split across as many archives as it takes.
+ *
+ * Batches are sent **sequentially and one at a time**, which is the point: a parallel upload would
+ * hold every batch's bytes simultaneously and put the memory problem straight back. Each iteration
+ * builds one zip, sends it, and drops its reference before the next begins.
+ *
+ * The last batch does not start the job — `POST /jobs/{id}/start` does, once every batch has
+ * landed. Starting on the final upload instead would race: a batch that failed and is being
+ * retried would arrive after processing had begun and be refused with a 409.
+ */
+export async function createJobInBatches(
+  files: File[],
+  config: JobConfig,
+  options: {
+    batchBytes?: number
+    batchSize?: number
+    onProgress?: (p: UploadProgress) => void
+    signal?: AbortSignal
+  } = {},
+): Promise<JobCreated> {
+  const batches = planUploadBatches(files, options.batchBytes, options.batchSize)
+  let jobId: string | null = null
+  let sent = 0
+
+  for (let i = 0; i < batches.length; i++) {
+    if (options.signal?.aborted) throw new ApiError('Upload cancelled.', 0)
+
+    const zip = await wrapImagesInZip(batches[i])
+
+    const body = new FormData()
+    body.set('file', zip)
+    body.set('config', JSON.stringify(config))
+    body.set('start', 'false')
+    if (jobId) body.set('job_id', jobId)
+
+    const created = await post<JobCreated>('/jobs', body, options.signal)
+    jobId = created.job_id
+    sent += batches[i].length
+
+    options.onProgress?.({
+      batch: i + 1,
+      batches: batches.length,
+      imagesSent: sent,
+      imagesTotal: files.length,
+    })
+  }
+
+  return startJob(jobId!)
+}
+
+export async function startJob(jobId: string): Promise<JobCreated> {
+  return post<JobCreated>(`/jobs/${encodeURIComponent(jobId)}/start`, undefined)
+}
+
+export async function cancelJob(jobId: string): Promise<JobStatus> {
+  return post<JobStatus>(`/jobs/${encodeURIComponent(jobId)}/cancel`, undefined)
+}
+
+export async function estimateJob(config: JobConfig, images: number): Promise<CostEstimate> {
+  const body = new FormData()
+  body.set('config', JSON.stringify(config))
+  body.set('images', String(images))
+  return post<CostEstimate>('/jobs/estimate', body)
+}
+
+/**
+ * Poll a job.
+ *
+ * `includeImages` defaults to **false**, which is the opposite of the endpoint's own default and
+ * deliberate: the per-image records are the bulk of the payload and the progress UI reads none of
+ * them. On a 400-image job polled every 1.2s that is megabytes per second of data nothing renders.
+ * The results grid fetches what it needs from `getJobImages` once the job is terminal.
+ */
+export async function getJob(jobId: string, includeImages = false): Promise<JobStatus> {
+  const query = includeImages ? '' : '?include_images=false'
+  return get<JobStatus>(`/jobs/${encodeURIComponent(jobId)}${query}`)
+}
+
+export async function getJobImages(
+  jobId: string,
+  offset: number,
+  limit: number,
+): Promise<ImagePage> {
+  return get<ImagePage>(
+    `/jobs/${encodeURIComponent(jobId)}/images?offset=${offset}&limit=${limit}`,
+  )
+}
+
+/**
+ * The server's own upload limits, so the UI sizes batches and warns about bulk from the real
+ * configuration rather than a hardcoded copy that drifts out of step with it.
+ *
+ * Falls back to conservative defaults rather than throwing: `/health` being unreachable should
+ * degrade the upload page, not break it.
+ */
+export async function getLimits(): Promise<ServerLimits> {
+  try {
+    const res = await fetch(`${API_BASE}/health`)
+    if (!res.ok) return FALLBACK_LIMITS
+    const body = await res.json()
+    return { ...FALLBACK_LIMITS, ...(body?.config?.limits ?? {}) }
+  } catch {
+    return FALLBACK_LIMITS
+  }
+}
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`)
   if (!res.ok) {
     const detail = await safeJson(res)
     throw new ApiError(summariseError(res.status, detail), res.status, detail)
@@ -49,8 +232,8 @@ export async function createJob(file: File, config: JobConfig): Promise<JobCreat
   return res.json()
 }
 
-export async function getJob(jobId: string): Promise<JobStatus> {
-  const res = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`)
+async function post<T>(path: string, body?: FormData, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', body, signal })
   if (!res.ok) {
     const detail = await safeJson(res)
     throw new ApiError(summariseError(res.status, detail), res.status, detail)
@@ -84,6 +267,13 @@ function summariseError(status: number, detail: unknown): string {
   }
   if (status === 413) return 'The upload is larger than the server allows.'
   if (status === 404) return 'Job not found.'
+  // 503 is the bulk gate: the server has no worker and the batch is too big to run inline. Its
+  // detail names the fix (start Redis and an rq worker), so pass it through rather than flattening
+  // it into a generic failure — the whole point of the error taxonomy is that causes stay distinct.
+  if (status === 503 && typeof detail === 'object' && detail && 'detail' in (detail as object)) {
+    return String((detail as Record<string, unknown>).detail)
+  }
+  if (status === 409) return 'This job has already started and cannot accept more images.'
   if (typeof detail === 'object' && detail && 'detail' in (detail as Record<string, unknown>)) {
     return String((detail as Record<string, unknown>).detail)
   }

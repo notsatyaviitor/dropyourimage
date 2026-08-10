@@ -79,7 +79,7 @@ Then [docs/SETUP.md](docs/SETUP.md) for the full path including the frontend and
 ## Status
 
 The four core capabilities — background removal, hex background, exact resize, centring — are implemented and
-verified end to end: `582 passed, 0 skipped`, with byte-exact hex and exact canvas dimensions asserted both in
+verified end to end: `652 passed, 0 skipped`, with byte-exact hex and exact canvas dimensions asserted both in
 tests and over HTTP. The imaging core (stages 2–5) needs **no API credentials** and is fully testable against
 synthetic fixtures, so procurement cannot block it.
 

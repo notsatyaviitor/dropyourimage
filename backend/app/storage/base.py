@@ -32,12 +32,24 @@ class StorageBackend(Protocol):
         ...
 
 
+# Must cover every `OutputFormat`. `tests/test_export.py` asserts that, because the failure mode
+# of a gap here is silent and format-specific rather than an error anywhere.
+#
+# BMP was missing, and BMP is the case where it actually breaks something. It is in
+# `formats.BROWSER_RENDERABLE`, so a BMP-only job correctly gets NO extra PNG preview — the
+# results grid puts the BMP itself into an `<img>`. Served as `application/octet-stream` the
+# browser treats that as a download and paints nothing, so the job produced a perfectly good file
+# and a blank card, with no preview to fall back on. Exactly the bug `preview_format` exists to
+# prevent, arriving through the one door it does not cover.
 CONTENT_TYPES = {
     "png": "image/png",
     "jpeg": "image/jpeg",
     "jpg": "image/jpeg",
+    "bmp": "image/bmp",
     "tiff": "image/tiff",
+    "tif": "image/tiff",
     "webp": "image/webp",
+    "eps": "application/postscript",
     "psd": "image/vnd.adobe.photoshop",
     "zip": "application/zip",
 }

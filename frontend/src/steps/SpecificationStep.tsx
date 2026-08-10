@@ -9,7 +9,28 @@
  *
  * Fields the *backend* does not implement are absent rather than shown-and-ignored. The one
  * exception is PSD, which is real but needs Adobe credentials — it says so instead of pretending.
+ *
+ * ## Reachable, but not all at once
+ *
+ * Every field being reachable turned into every field being *shouted*: five cards, seventeen
+ * controls, and twelve paragraphs of rationale, all competing at the same visual weight. The page
+ * read as documentation rather than a form, and the three settings an operator actually changes —
+ * colour, size, format — were buried among the ones they never touch.
+ *
+ * Two mechanisms fix that without deleting anything:
+ *
+ * * **`<Advanced>`** — a collapsed `<details>` per card holding the controls that have a correct
+ *   default and are rarely moved (fit, margin, alpha threshold, layer names).
+ * * **`explain`** — one page-level switch, off by default, that reveals the rationale prose.
+ *
+ * **What is never folded away**: anything that is a *consequence* rather than an explanation —
+ * the Gemini hard-edge warning, the per-object cost of multi-object, the hex validation error, the
+ * Adobe-fallback banner, and which formats transparency has disabled. Those are the same class of
+ * thing as a `Note` on a result, and `frontend/CLAUDE.md` is explicit that they must not be
+ * swallowed. A default being hidden is fine; a consequence being hidden is not.
  */
+
+import { useState } from 'react'
 
 import type {
   BackgroundSpec,
@@ -83,13 +104,35 @@ export function SpecificationStep({
     onChange({ ...config, psd: next, export: { ...exportSpec, formats } })
   }
 
+  /**
+   * Un-ticking the last format is allowed **when "return each image in its own format" is on**.
+   *
+   * That combination is how you ask for "give me back exactly what I uploaded, and nothing else".
+   * Previously at least one format was always required, so every image picked up an extra file
+   * nobody asked for — a PNG beside every PSD, turning a 132-image order into 264 files. With
+   * match_source off, one format is still mandatory or the job would deliver nothing.
+   */
   const toggleFormat = (fmt: OutputFormat) => {
     const has = exportSpec.formats.includes(fmt)
-    if (has && exportSpec.formats.length === 1) return // at least one format is required
+    if (has && exportSpec.formats.length === 1 && !exportSpec.match_source) return
     setExport({
       formats: has ? exportSpec.formats.filter((f) => f !== fmt) : [...exportSpec.formats, fmt],
     })
   }
+
+  /** Turning match_source off with no formats ticked would deliver nothing; restore a default. */
+  const setMatchSource = (on: boolean) =>
+    onChange({
+      ...config,
+      export: {
+        ...exportSpec,
+        match_source: on,
+        formats: !on && exportSpec.formats.length === 0 ? ['png'] : exportSpec.formats,
+      },
+    })
+
+  /** Rationale prose, off by default. See the module docstring for what is NOT gated by this. */
+  const [explain, setExplain] = useState(false)
 
   const hexValid = background.transparent || HEX_RE.test(background.color ?? '')
 
@@ -99,9 +142,19 @@ export function SpecificationStep({
         <div className="ptrow-left">
           <h1 className="page-title">Select a specification</h1>
         </div>
-        <button type="button" className="btn-next" onClick={onNext} disabled={!hexValid}>
-          Next
-        </button>
+        <div className="ptrow-right">
+          <label className="explain-switch" title="Show why each setting exists">
+            <input
+              type="checkbox"
+              checked={explain}
+              onChange={(e) => setExplain(e.target.checked)}
+            />
+            Explain settings
+          </label>
+          <button type="button" className="btn-next" onClick={onNext} disabled={!hexValid}>
+            Next
+          </button>
+        </div>
       </div>
 
       <p className="section-label">Personal specifications</p>
@@ -132,6 +185,60 @@ export function SpecificationStep({
               detail="Remove the original background. The only step in this pipeline that calls an AI service — everything below is deterministic code."
               alwaysOn
             >
+              <p className="opt-sublabel">
+                Subject <span className="opt-optional">optional</span>
+              </p>
+              <input
+                type="text"
+                className="opt-input"
+                maxLength={120}
+                placeholder="e.g. coffee table"
+                value={cutout.subject_prompt ?? ''}
+                onChange={(e) => setCutout({ subject_prompt: e.target.value.trim() ? e.target.value : null })}
+              />
+              {explain && (
+                <p className="opt-help">
+                  Leave empty for a packshot. Name the object when the photograph contains several —
+                  background removal separates foreground from background and cannot tell{' '}
+                  <em>which</em> foreground you meant, so without this it may return the sofa when
+                  you wanted the table.
+                </p>
+              )}
+
+              {cutout.subject_prompt && (
+                <>
+                  <p className="opt-sublabel">
+                    Context around the subject — {cutout.subject_padding_pct}%
+                  </p>
+                  <input
+                    type="range"
+                    className="opt-range"
+                    min={0}
+                    max={50}
+                    step={1}
+                    value={cutout.subject_padding_pct}
+                    onChange={(e) => setCutout({ subject_padding_pct: Number(e.target.value) })}
+                  />
+                  {explain && (
+                    <p className="opt-help">
+                      Raise this if the cut-out clips the subject; lower it if neighbouring objects
+                      creep in.
+                    </p>
+                  )}
+                </>
+              )}
+
+              {/* A cost consequence, not an explanation — shown whenever the mode is ON, even
+                  though the control itself lives under Advanced. Nine objects is nine calls. */}
+              {cutout.multi_object && (
+                <p className="opt-note opt-note-warn">
+                  Layer-per-object is on: this bills <strong>one segmentation call per object</strong>,
+                  so a nine-object room costs nine times a single cut-out. Centring, shadow
+                  reconstruction and background replacement are all skipped.
+                </p>
+              )}
+
+              <Advanced>
               <label className="opt-check">
                 <input
                   type="checkbox"
@@ -140,14 +247,13 @@ export function SpecificationStep({
                 />
                 Layer every object separately (scenes, not packshots)
               </label>
-              <p className="opt-help">
-                For a room or lifestyle shot: a model lists the objects and each is cut out into
-                its own named PSD layer with its own saved path — bed, pillows, plant, and so on.
-                <strong> Costs one segmentation call per object</strong>, so a nine-object room is
-                nine times the price of a single cut-out. Centring, shadow reconstruction and
-                background replacement are all skipped, because none of them mean anything for a
-                scene. Leave off for a single product.
-              </p>
+              {explain && (
+                <p className="opt-help">
+                  For a room or lifestyle shot: a model lists the objects and each is cut out into
+                  its own named PSD layer with its own saved path — bed, pillows, plant, and so on.
+                  Leave off for a single product.
+                </p>
+              )}
 
               <p className="opt-sublabel">Engine strategy</p>
               <select
@@ -194,44 +300,6 @@ export function SpecificationStep({
                 </>
               )}
 
-              <p className="opt-sublabel">
-                Subject <span className="opt-optional">optional</span>
-              </p>
-              <input
-                type="text"
-                className="opt-input"
-                maxLength={120}
-                placeholder="e.g. coffee table"
-                value={cutout.subject_prompt ?? ''}
-                onChange={(e) => setCutout({ subject_prompt: e.target.value.trim() ? e.target.value : null })}
-              />
-              <p className="opt-help">
-                Leave empty for a packshot. Name the object when the photograph contains several —
-                background removal separates foreground from background and cannot tell <em>which</em>{' '}
-                foreground you meant, so without this it may return the sofa when you wanted the table.
-              </p>
-
-              {cutout.subject_prompt && (
-                <>
-                  <p className="opt-sublabel">
-                    Context around the subject — {cutout.subject_padding_pct}%
-                  </p>
-                  <input
-                    type="range"
-                    className="opt-range"
-                    min={0}
-                    max={50}
-                    step={1}
-                    value={cutout.subject_padding_pct}
-                    onChange={(e) => setCutout({ subject_padding_pct: Number(e.target.value) })}
-                  />
-                  <p className="opt-help">
-                    Raise this if the cut-out clips the subject; lower it if neighbouring objects
-                    creep in.
-                  </p>
-                </>
-              )}
-
               <label className="opt-check">
                 <input
                   type="checkbox"
@@ -240,6 +308,7 @@ export function SpecificationStep({
                 />
                 Keep the losing candidate for side-by-side review
               </label>
+              </Advanced>
             </ServiceRow>
 
             {/* ── Background ─────────────────────────────────────── */}
@@ -253,9 +322,8 @@ export function SpecificationStep({
               toggleTitle="Off = transparent output (PNG alpha preserved)"
             >
               {background.transparent ? (
-                <p className="opt-help">
-                  Transparent output. Alpha is preserved end to end and JPEG is unavailable, since it
-                  cannot carry transparency.
+                <p className="opt-note">
+                  Transparent output — JPEG, BMP and EPS are unavailable, since none carries alpha.
                 </p>
               ) : (
                 <>
@@ -279,10 +347,12 @@ export function SpecificationStep({
                     />
                   </div>
                   {!hexValid && <p className="opt-error">Enter a hex colour like #F5F5F5 or #FFF.</p>}
-                  <p className="opt-help">
-                    Delivered byte-exact. The value is treated as sRGB and converted, not copied, when
-                    the output profile is Adobe RGB.
-                  </p>
+                  {explain && (
+                    <p className="opt-help">
+                      Delivered byte-exact. The value is treated as sRGB and converted, not copied,
+                      when the output profile is Adobe RGB.
+                    </p>
+                  )}
                 </>
               )}
 
@@ -307,19 +377,29 @@ export function SpecificationStep({
                   Remove
                 </label>
               </div>
-              <p className="opt-help">
-                Preserving reconstructs the photographed shadow onto the new colour. It needs a
-                uniform original backdrop, so on a lifestyle scene it is skipped and says so.
-              </p>
+              {explain && (
+                <p className="opt-help">
+                  Preserving reconstructs the photographed shadow onto the new colour. It needs a
+                  uniform original backdrop, so on a lifestyle scene it is skipped and says so.
+                </p>
+              )}
 
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={background.decontaminate_edges}
-                  onChange={(e) => setBackground({ decontaminate_edges: e.target.checked })}
-                />
-                Decontaminate edges — removes the halo left by the original backdrop
-              </label>
+              <Advanced>
+                <label className="opt-check">
+                  <input
+                    type="checkbox"
+                    checked={background.decontaminate_edges}
+                    onChange={(e) => setBackground({ decontaminate_edges: e.target.checked })}
+                  />
+                  Decontaminate edges — removes the halo left by the original backdrop
+                </label>
+                {explain && (
+                  <p className="opt-help">
+                    On by default. Un-mixes the original backdrop out of the edge band, which is
+                    what stops a white studio sweep leaving a halo against a saturated colour.
+                  </p>
+                )}
+              </Advanced>
             </ServiceRow>
 
             {/* ── Output size ────────────────────────────────────── */}
@@ -364,8 +444,57 @@ export function SpecificationStep({
                 />
                 <span className="size-unit">px</span>
               </div>
-              <p className="opt-help">Asserted before delivery — 500 × 500 means exactly 500 × 500.</p>
+              {explain && (
+                <p className="opt-help">Asserted before delivery — 500 × 500 means exactly 500 × 500.</p>
+              )}
 
+              <label className="opt-check">
+                <input
+                  type="checkbox"
+                  checked={exportSpec.match_source}
+                  onChange={(e) => setMatchSource(e.target.checked)}
+                />
+                Return each image in the format it was uploaded as
+              </label>
+              {explain && (
+                <p className="opt-help">
+                  A PNG in gives a PNG out, a TIFF a TIFF, a PSD a PSD — combined with anything
+                  ticked below. Camera raw (CR2, CR3, NEF, CRW, DNG, RAW) is the exception: it
+                  decodes but cannot be written back, so those deliver 16-bit TIFF and say so.
+                </p>
+              )}
+
+              <p className="opt-sublabel">
+                Also deliver
+                {exportSpec.formats.length === 0 && (
+                  <span className="opt-sublabel-note"> — nothing extra; uploaded format only</span>
+                )}
+              </p>
+              <div className="fmt-row">
+                {RASTER_FORMATS.map((f) => {
+                  const disabled = NO_ALPHA_FORMATS.includes(f) && background.transparent
+                  return (
+                    <label key={f} className={`fmt-chip${disabled ? ' disabled' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={exportSpec.formats.includes(f)}
+                        disabled={disabled}
+                        onChange={() => toggleFormat(f)}
+                      />
+                      {f.toUpperCase()}
+                    </label>
+                  )
+                })}
+              </div>
+              {exportSpec.match_source && exportSpec.formats.length > 0 && (
+                <p className="opt-note">
+                  Each image is delivered twice: in its own format, plus{' '}
+                  {exportSpec.formats.map((f) => f.toUpperCase()).join(' + ')}. Un-tick all of the
+                  above for one file per upload.
+                </p>
+              )}
+
+              <Advanced>
               <p className="opt-sublabel">Fit</p>
               <select
                 className="opt-input opt-select"
@@ -399,51 +528,10 @@ export function SpecificationStep({
                 />
                 Allow enlarging a source smaller than the canvas
               </label>
-              <p className="opt-help">
-                Off by default: an undersized master is padded rather than stretched, and the result
-                says which happened.
-              </p>
-
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={exportSpec.match_source}
-                  onChange={(e) =>
-                    onChange({
-                      ...config,
-                      export: { ...exportSpec, match_source: e.target.checked },
-                    })
-                  }
-                />
-                Also return each image in the format it was uploaded as
-              </label>
-              <p className="opt-help">
-                A PNG in gives a PNG out, a TIFF a TIFF, and so on — combined with anything ticked
-                below. Camera raw (CR2, CR3, NEF, CRW, DNG, RAW) is the exception: it decodes but
-                cannot be written back, so those deliver 16-bit TIFF and say so on the result.
-              </p>
-
-              <p className="opt-sublabel">Output formats</p>
-              <div className="fmt-row">
-                {RASTER_FORMATS.map((f) => {
-                  const disabled = NO_ALPHA_FORMATS.includes(f) && background.transparent
-                  return (
-                    <label key={f} className={`fmt-chip${disabled ? ' disabled' : ''}`}>
-                      <input
-                        type="checkbox"
-                        checked={exportSpec.formats.includes(f)}
-                        disabled={disabled}
-                        onChange={() => toggleFormat(f)}
-                      />
-                      {f.toUpperCase()}
-                    </label>
-                  )
-                })}
-              </div>
-              {background.transparent && (
+              {explain && (
                 <p className="opt-help">
-                  JPEG, BMP and EPS are unavailable while the background is transparent — none of
-                  them can carry an alpha channel.
+                  Off by default: an undersized master is padded rather than stretched, and the
+                  result says which happened.
                 </p>
               )}
 
@@ -456,6 +544,7 @@ export function SpecificationStep({
                 <option value="srgb">sRGB</option>
                 <option value="adobe_rgb">Adobe RGB (1998)</option>
               </select>
+              </Advanced>
             </ServiceRow>
 
             {/* ── Centring ───────────────────────────────────────── */}
@@ -477,6 +566,7 @@ export function SpecificationStep({
                 </span>
               </div>
 
+              <Advanced>
               <p className="opt-sublabel">Centre on</p>
               <div className="opt-radio-row">
                 <label className="opt-radio">
@@ -498,11 +588,13 @@ export function SpecificationStep({
                   Centre of mass
                 </label>
               </div>
-              <p className="opt-help">
-                These disagree for an asymmetric product — a mug with a handle looks centred by
-                bounding box but sits off-centre by mass. The residual offset is measured and reported
-                either way.
-              </p>
+              {explain && (
+                <p className="opt-help">
+                  These disagree for an asymmetric product — a mug with a handle looks centred by
+                  bounding box but sits off-centre by mass. The residual offset is measured and
+                  reported either way.
+                </p>
+              )}
 
               <label className="opt-check">
                 <input
@@ -523,10 +615,13 @@ export function SpecificationStep({
                 value={centring.alpha_threshold}
                 onChange={(e) => setCentring({ alpha_threshold: Number(e.target.value) })}
               />
-              <p className="opt-help">
-                Which pixels count when measuring the subject&rsquo;s bounds. Measurement only — the
-                stored alpha is never thresholded.
-              </p>
+              {explain && (
+                <p className="opt-help">
+                  Which pixels count when measuring the subject&rsquo;s bounds. Measurement only —
+                  the stored alpha is never thresholded.
+                </p>
+              )}
+              </Advanced>
             </ServiceRow>
 
             {/* ── PSD ────────────────────────────────────────────── */}
@@ -545,6 +640,7 @@ export function SpecificationStep({
                   Adobe path is untested. See docs/PSD.md.
                 </div>
               )}
+              <Advanced>
               <label className="opt-check">
                 <input
                   type="checkbox"
@@ -574,11 +670,28 @@ export function SpecificationStep({
                   </div>
                 ))}
               </div>
+              </Advanced>
             </ServiceRow>
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Controls with a correct default that are rarely moved. Collapsed, native `<details>`.
+ *
+ * Native rather than a hand-rolled disclosure so keyboard, screen readers and in-page find all
+ * work without any code — the same reasoning as using Radix for the zoom dialog rather than a
+ * click-outside div.
+ */
+function Advanced({ label = 'Advanced', children }: { label?: string; children: React.ReactNode }) {
+  return (
+    <details className="opt-advanced">
+      <summary>{label}</summary>
+      <div className="opt-advanced-body">{children}</div>
+    </details>
   )
 }
 

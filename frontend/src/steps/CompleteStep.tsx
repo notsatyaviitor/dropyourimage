@@ -18,13 +18,27 @@
  * - Download links point at real signed asset URLs, and the batch download is the real bundle zip.
  */
 
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import type { ImageResult, JobConfig, JobStatus, Note } from '@/api/types'
-import { BROWSER_RENDERABLE, NOTE_LABELS } from '@/api/types'
-import { resolveAssetUrl } from '@/api/client'
+import { BROWSER_RENDERABLE, NOTE_LABELS, isBrowserRenderableFile } from '@/api/types'
+import { getJobImages, resolveAssetUrl } from '@/api/client'
+import { useObjectUrl } from '@/lib/objectUrl'
 import { formatBytes } from '@/lib/utils'
 import type { PickedFile } from './UploadStep'
+
+/**
+ * Result cards rendered at once.
+ *
+ * Each card carries two `<img>` — the source the user picked and the delivered asset — so 400
+ * results is 800 full-resolution decodes if the grid is rendered whole. That is the same
+ * arithmetic that forced pagination on the upload list (see `lib/objectUrl.ts`), arriving from
+ * the other end of the pipeline.
+ *
+ * Pages are fetched from `GET /jobs/{id}/images` rather than sliced from the polled status, so
+ * the poll itself never has to carry all 400 records either.
+ */
+const RESULTS_PER_PAGE = 24
 
 /** Error copy — the API's taxonomy exists so these never collapse into one toast. */
 const ERROR_COPY: Record<string, string> = {
@@ -32,6 +46,7 @@ const ERROR_COPY: Record<string, string> = {
   vendor_timeout: 'The segmentation service did not respond in time',
   vendor_unauthorized: 'A vendor API key is missing or was rejected',
   vendor_out_of_credits: 'The engine account is out of credits — top it up to continue',
+  vendor_payload_too_large: 'The image was too large for the segmentation service to accept',
   no_foreground_found: 'No subject could be found to cut out — try more padding, or a different subject',
   vendor_error: 'The segmentation service returned an error',
   unsupported_file: 'Not a supported image file',
@@ -80,24 +95,60 @@ export function CompleteStep({
   status,
   config,
   picked,
+  jobId,
   onBack,
   onNewOrder,
 }: {
   status: JobStatus | null
   config: JobConfig
   picked: PickedFile[]
+  jobId: string | null
   onBack: () => void
   onNewOrder: () => void
 }) {
   const [zoom, setZoom] = useState<{ url: string; caption: string } | null>(null)
+  const [page, setPage] = useState(0)
+  const [fetched, setFetched] = useState<ImageResult[] | null>(null)
 
-  const images = status?.images ?? []
+  const total = status?.images_total ?? status?.images.length ?? 0
+  const pages = Math.max(1, Math.ceil(total / RESULTS_PER_PAGE))
+
+  /**
+   * The records for the current page.
+   *
+   * The final poll fetches the whole record, which is everything a job small enough to fit on one
+   * page needs — so the common case costs no extra request. Anything larger pages from the API.
+   */
+  useEffect(() => {
+    if (!jobId || total <= RESULTS_PER_PAGE) {
+      setFetched(null)
+      return
+    }
+    let live = true
+    getJobImages(jobId, page * RESULTS_PER_PAGE, RESULTS_PER_PAGE)
+      .then((p) => live && setFetched(p.images))
+      .catch(() => live && setFetched(null))
+    return () => {
+      live = false
+    }
+  }, [jobId, page, total])
+
+  const allImages = status?.images ?? []
+  const images = fetched ?? allImages
   const done = images.filter((i) => i.state === 'done')
   const failed = images.filter((i) => i.state !== 'done')
   const transparent = config.background.transparent
 
+  // Counts come from the JOB, never from the page — `status.completed`/`failed` are authoritative
+  // and a page of 24 says nothing about the other 376.
+  const doneTotal = status?.completed ?? done.length
+  const failedTotal = status?.failed ?? failed.length
+
   /** Match a result back to the file the user picked, so "before" is the genuine source. */
-  const beforeFor = (r: ImageResult) => picked.find((p) => p.file.name === r.source_name)?.previewUrl
+  const pickedByName = useMemo(
+    () => new Map(picked.map((p) => [p.file.name, p.file])),
+    [picked],
+  )
 
   return (
     <div className="wizard-page active">
@@ -117,7 +168,7 @@ export function CompleteStep({
       </div>
 
       <div className="complete-wrap">
-        {status?.state === 'failed' && images.length === 0 ? (
+        {status?.state === 'failed' && total === 0 ? (
           <div className="res-error">
             <AlertIcon />
             <span>{status.error?.message ?? 'Nothing in this batch could be processed.'}</span>
@@ -128,26 +179,26 @@ export function CompleteStep({
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#2c9424" strokeWidth="2.2" strokeLinecap="round">
                 <polyline points="2,7 6,11 12,3" />
               </svg>
-              {failed.length === 0 ? 'PROCESSING COMPLETE' : `${done.length} OF ${images.length} SUCCEEDED`}
+              {failedTotal === 0 ? 'PROCESSING COMPLETE' : `${doneTotal} OF ${total} SUCCEEDED`}
             </div>
 
             <h2 className="complete-title">
-              {done.length > 0 ? 'Your images are ready' : 'No images could be processed'}
+              {doneTotal > 0 ? 'Your images are ready' : 'No images could be processed'}
             </h2>
             <p className="complete-sub">
-              {done.length > 0
+              {doneTotal > 0
                 ? `Backgrounds removed, ${transparent ? 'transparency preserved' : `background set to ${config.background.color}`}, resized to ${config.size.width} × ${config.size.height} and centred.`
                 : 'Every image in this batch failed — see the reasons below.'}
             </p>
 
             {/* Summary — only quantities the API actually reported. */}
             <div className="proc-summary">
-              <SummaryItem label="In batch" val={String(images.length)} sub="images total" />
+              <SummaryItem label="In batch" val={String(total)} sub="images total" />
               <SummaryItem
                 label="Succeeded"
-                val={String(done.length)}
-                sub={failed.length > 0 ? `${failed.length} failed` : 'all images'}
-                cls={failed.length > 0 ? '' : 'val-green'}
+                val={String(doneTotal)}
+                sub={failedTotal > 0 ? `${failedTotal} failed` : 'all images'}
+                cls={failedTotal > 0 ? '' : 'val-green'}
               />
               <SummaryItem
                 label="Output size"
@@ -163,11 +214,28 @@ export function CompleteStep({
               />
             </div>
 
+            {status && status.rate_limit_events > 0 && (
+              // Vendor throttling is expected at this batch size and is not our bug. Saying so
+              // keeps a slow run from being reported as a broken one.
+              <div className="res-note-banner">
+                A segmentation vendor rate-limited this job {status.rate_limit_events} time
+                {status.rate_limit_events === 1 ? '' : 's'}. The batch slowed itself down and
+                carried on; no image was lost to it.
+              </div>
+            )}
+
+            {status?.state === 'cancelled' && (
+              <div className="res-note-banner">
+                This job was cancelled. Images that had already finished are below and remain
+                downloadable.
+              </div>
+            )}
+
             <div className="batch-section">
               <div className="batch-section-hdr">
                 <div>
                   <div className="batch-title">
-                    Processed batch · <span>{images.length}</span> images
+                    Processed batch · <span>{total}</span> images
                   </div>
                   <div className="batch-meta">
                     Pipeline <strong>{status?.pipeline_version}</strong> · config{' '}
@@ -186,66 +254,48 @@ export function CompleteStep({
               {images.length === 0 ? (
                 <div className="res-empty">No results returned.</div>
               ) : (
-                <div className="result-grid">
-                  {images.map((r) => (
-                    <ResultCard
-                      key={r.source_name}
-                      result={r}
-                      transparent={transparent}
-                      onZoom={setZoom}
+                <>
+                  <div className="result-grid">
+                    {images.map((r, i) => (
+                      <ResultCard
+                        key={`${r.source_name}-${i}`}
+                        result={r}
+                        transparent={transparent}
+                        onZoom={setZoom}
+                      />
+                    ))}
+                  </div>
+
+                  {pages > 1 && (
+                    <Pager
+                      page={page}
+                      pages={pages}
+                      from={page * RESULTS_PER_PAGE + 1}
+                      to={Math.min((page + 1) * RESULTS_PER_PAGE, total)}
+                      total={total}
+                      onChange={setPage}
                     />
-                  ))}
-                </div>
+                  )}
+                </>
               )}
             </div>
 
             {done.length > 0 && (
               <div className="ba-section">
-                <div className="ba-section-title">Before &amp; after — side by side</div>
+                <div className="ba-section-title">
+                  Before &amp; after — side by side
+                  {pages > 1 && <span className="ba-section-note"> (this page)</span>}
+                </div>
                 <div className="ba-row">
-                  {done.map((r) => {
-                    const before = beforeFor(r)
-                    // Not outputs[0]: that is the delivered format, which for a TIFF/EPS/PSD job
-                    // renders as an empty box. See viewableOutput.
-                    const after = viewableOutput(r)
-                    return (
-                      <div className="ba-card" key={r.source_name}>
-                        <div className="ba-card-label-row">
-                          <div className="ba-label before">Before</div>
-                          <div className="ba-label after">After</div>
-                        </div>
-                        <div className="ba-imgs">
-                          <div className="ba-img-wrap before">
-                            {before ? (
-                              <img className="ba-img" src={before} alt="" />
-                            ) : (
-                              <span className="res-empty">source not retained</span>
-                            )}
-                          </div>
-                          <div className={`ba-img-wrap after${transparent ? ' checkerboard-bg' : ''}`}>
-                            {after ? (
-                              <img
-                                className="ba-img"
-                                src={resolveAssetUrl(after.url)}
-                                alt=""
-                                onClick={() =>
-                                  setZoom({
-                                    url: resolveAssetUrl(after.url),
-                                    caption: `${r.source_name} — ${after.width}×${after.height} ${after.format.toUpperCase()}`,
-                                  })
-                                }
-                              />
-                            ) : (
-                              // Rendering nothing here is what made this read as a bug rather
-                              // than a missing file. Say which it is.
-                              <span className="res-empty">no viewable output</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="ba-card-name">{r.source_name}</div>
-                      </div>
-                    )
-                  })}
+                  {done.map((r, i) => (
+                    <BeforeAfterCard
+                      key={`${r.source_name}-${i}`}
+                      result={r}
+                      source={pickedByName.get(r.source_name)}
+                      transparent={transparent}
+                      onZoom={setZoom}
+                    />
+                  ))}
                 </div>
               </div>
             )}
@@ -253,7 +303,7 @@ export function CompleteStep({
             <div className="complete-actions">
               {status?.bundle_url ? (
                 <a className="btn-download" href={resolveAssetUrl(status.bundle_url)} download>
-                  Download all files ({done.length})
+                  Download all files ({doneTotal})
                 </a>
               ) : (
                 <button type="button" className="btn-download" disabled title="No successful outputs to bundle">
@@ -285,6 +335,116 @@ export function CompleteStep({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+    </div>
+  )
+}
+
+/**
+ * One before/after pair.
+ *
+ * Its own component so `useObjectUrl` scopes the source thumbnail to it: the "before" image is
+ * the user's original file, which for a 400-image order is gigabytes of `File` data that would
+ * otherwise be pinned and decoded all at once. Only the cards on the current page hold one.
+ *
+ * `source` is undefined when the results page is reached without the original files in hand — a
+ * reload, or a job started in another session. That is said plainly rather than shown as a blank
+ * box, which reads as a broken image.
+ */
+function BeforeAfterCard({
+  result,
+  source,
+  transparent,
+  onZoom,
+}: {
+  result: ImageResult
+  source: File | undefined
+  transparent: boolean
+  onZoom: (z: { url: string; caption: string }) => void
+}) {
+  // Only make an object URL for a file the browser can actually decode. A PSD or EPS handed to an
+  // `<img>` renders nothing — which is exactly why every "before" panel was blank for this
+  // client's material — so those use the backend's thumbnail instead.
+  const renderableLocally = !!source && isBrowserRenderableFile(source.name)
+  const localUrl = useObjectUrl(renderableLocally ? source : undefined)
+  const before = localUrl ?? (result.source_preview_url ? resolveAssetUrl(result.source_preview_url) : undefined)
+  // Not outputs[0]: that is the delivered format, which for a TIFF/EPS/PSD job renders as an
+  // empty box. See viewableOutput.
+  const after = viewableOutput(result)
+
+  return (
+    <div className="ba-card">
+      <div className="ba-card-label-row">
+        <div className="ba-label before">Before</div>
+        <div className="ba-label after">After</div>
+      </div>
+      <div className="ba-imgs">
+        <div className="ba-img-wrap before">
+          {before ? (
+            <img className="ba-img" src={before} alt="" loading="lazy" />
+          ) : (
+            // Distinguish the two reasons rather than showing one blank box for both, the same
+            // way the "after" side names "no viewable output".
+            <span className="res-empty">
+              {source ? `no preview for ${result.source_format?.toUpperCase() ?? 'this format'}` : 'source not retained'}
+            </span>
+          )}
+        </div>
+        <div className={`ba-img-wrap after${transparent ? ' checkerboard-bg' : ''}`}>
+          {after ? (
+            <img
+              className="ba-img"
+              src={resolveAssetUrl(after.url)}
+              alt=""
+              loading="lazy"
+              onClick={() =>
+                onZoom({
+                  url: resolveAssetUrl(after.url),
+                  caption: `${result.source_name} — ${after.width}×${after.height} ${after.format.toUpperCase()}`,
+                })
+              }
+            />
+          ) : (
+            // Rendering nothing here is what made this read as a bug rather than a missing file.
+            // Say which it is.
+            <span className="res-empty">no viewable output</span>
+          )}
+        </div>
+      </div>
+      <div className="ba-card-name">{result.source_name}</div>
+    </div>
+  )
+}
+
+function Pager({
+  page,
+  pages,
+  from,
+  to,
+  total,
+  onChange,
+}: {
+  page: number
+  pages: number
+  from: number
+  to: number
+  total: number
+  onChange: (p: number) => void
+}) {
+  return (
+    <div className="result-pager">
+      <button type="button" onClick={() => onChange(Math.max(0, page - 1))} disabled={page === 0}>
+        Previous
+      </button>
+      <span>
+        {from}&ndash;{to} of {total}
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(Math.min(pages - 1, page + 1))}
+        disabled={page >= pages - 1}
+      >
+        Next
+      </button>
     </div>
   )
 }
@@ -352,12 +512,32 @@ function ResultCard({
         </span>
       </div>
 
+      {/*
+        Everything below the filename shares one padded, gap-spaced column.
+        These blocks were direct children of `.result-card`, which has no padding of its own — so
+        the chips, download links and metadata all sat flush against the card's left edge while the
+        filename above them was inset by 16px. Every row was individually spaced with its own
+        `margin-top`, which is why they also read as one dense paragraph rather than distinct
+        groups. One wrapper fixes both: the padding aligns them with the filename, and a flex `gap`
+        replaces six competing margins.
+      */}
+      <div className="result-card-body">
       {result.error && (
         <div className="res-error">
           <AlertIcon />
           <span>
             {ERROR_COPY[result.error.code] ?? result.error.code}
             {result.error.retryable && ' — may succeed on retry'}
+            {/*
+              The specific reason, which the API has always sent and this used to discard. The
+              code's copy is a category ("File exceeds the size limit"); `message` is the fact
+              ("This file is 130 MB; the per-image limit is 50 MB"). Showing only the category
+              cost a real debugging session on a rejected PSD — the answer was on the screen the
+              whole time, one field away.
+            */}
+            {result.error.message && (
+              <span className="res-error-detail">{result.error.message}</span>
+            )}
           </span>
         </div>
       )}
@@ -395,44 +575,37 @@ function ResultCard({
       {ok && (
         <div className="res-meta">
           {primary && (
-            <>
+            <div className="res-meta-row">
               <strong>{primary.width} × {primary.height}</strong> px · {primary.profile === 'srgb' ? 'sRGB' : 'Adobe RGB'}
-              <br />
-            </>
+            </div>
           )}
           {result.layers.length > 0 && (
-            <>
+            <div className="res-meta-row">
               {/* The whole point of the mode — name the layers a retoucher will open. */}
-              {result.layers.length} PSD layers:{' '}
-              <strong>{result.layers.join(', ')}</strong>
-              <br />
-            </>
+              {result.layers.length} PSD layers: <strong>{result.layers.join(', ')}</strong>
+            </div>
           )}
           {result.source_format && (
-            <>
+            <div className="res-meta-row">
               {/* Both halves of the round trip, so "did I get my format back" is answerable at a
                   glance rather than by reading the note text. */}
               uploaded <strong>{result.source_format.toUpperCase()}</strong>
               {' → '}
-              <strong>
-                {result.outputs.map((o) => o.format.toUpperCase()).join(', ') || '—'}
-              </strong>
-              <br />
-            </>
+              <strong>{result.outputs.map((o) => o.format.toUpperCase()).join(', ') || '—'}</strong>
+            </div>
           )}
           {result.chosen_engine && (
-            <>
+            <div className="res-meta-row">
               engine <strong>{result.chosen_engine}</strong>
               {result.cache_hit && ' · from cache'}
               {!result.cache_hit && result.cost_usd > 0 && ` · $${result.cost_usd.toFixed(4)}`}
-              <br />
-            </>
+            </div>
           )}
           {offset && (
-            <span className={offCentre ? 'res-meta-warn' : undefined}>
+            <div className={`res-meta-row${offCentre ? ' res-meta-warn' : ''}`}>
               centroid offset {offset[0].toFixed(1)}px, {offset[1].toFixed(1)}px
               {offCentre && ' — far off centre, mask may cover more than one object'}
-            </span>
+            </div>
           )}
           {result.candidates.length > 1 && (
             <details>
@@ -452,6 +625,7 @@ function ResultCard({
           )}
         </div>
       )}
+      </div>
     </div>
   )
 }

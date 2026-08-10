@@ -289,7 +289,7 @@ output before suspecting the pipeline's maths.
 
 ```bash
 cd backend && source .venv/bin/activate
-pytest                       # 582 passed, 0 skipped — no keys, no images
+pytest                       # 652 passed, 0 skipped — no keys, no images
 python scripts/demo.py       # 7 configs -> ../data/output/
 ```
 

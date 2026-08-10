@@ -14,6 +14,7 @@
  * It can also end in failure, which the prototype had no state for.
  */
 
+import type { UploadProgress } from '@/api/client'
 import type { JobStatus } from '@/api/types'
 
 const STAGES = [
@@ -25,30 +26,80 @@ const STAGES = [
 
 const RING_CIRCUMFERENCE = 314.16
 
-export function ProcessingOverlay({ status, jobId }: { status: JobStatus | null; jobId: string | null }) {
-  if (!jobId) return null
-
+export function ProcessingOverlay({
+  status,
+  jobId,
+  upload,
+  uploadTotal = 0,
+  cancelling,
+  onCancel,
+}: {
+  status: JobStatus | null
+  jobId: string | null
+  upload?: UploadProgress | null
+  /** How many files the user picked. Known before the first batch lands, unlike `upload`. */
+  uploadTotal?: number
+  cancelling?: boolean
+  onCancel?: () => void
+}) {
+  // Mounting is App's decision (it knows when the whole flow is busy); this renders whenever it
+  // is mounted. Gating on `jobId` here was what kept the upload phase invisible.
   const total = status?.total ?? 0
   const done = (status?.completed ?? 0) + (status?.failed ?? 0)
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+
+  // Two distinct phases, and the boundary is "does a job exist yet". Keying this off `upload`
+  // instead left a window — between the click and the first batch landing — where the panel
+  // claimed the pipeline was already segmenting and offered to cancel a job that did not exist.
+  const uploading = !jobId
+  const sent = upload?.imagesSent ?? 0
+  const batchTotal = upload?.imagesTotal ?? uploadTotal
+  const pct = uploading
+    ? Math.round((sent / Math.max(1, batchTotal)) * 100)
+    : total > 0
+      ? Math.round((done / total) * 100)
+      : 0
   const terminal = status ? ['completed', 'failed', 'cancelled'].includes(status.state) : false
+  const throttled = (status?.rate_limit_events ?? 0) > 0
 
   // With no per-stage telemetry, the only defensible mapping is "how far through the batch are we".
   // Stage rows are marked done proportionally so the panel is informative without inventing timings.
-  const stagesDone = total > 0 ? Math.floor((done / total) * STAGES.length) : 0
+  const stagesDone = total > 0 && !uploading ? Math.floor((done / total) * STAGES.length) : 0
 
-  const caption = !status
-    ? 'Submitting batch…'
-    : status.state === 'queued'
-      ? 'Queued — waiting for a worker'
-      : status.state === 'failed'
-        ? (status.error?.message ?? 'The job failed.')
-        : terminal
-          ? 'All images processed — packaging output files…'
-          : `Processing image ${Math.min(done + 1, total)} of ${total}…`
+  /** Upload is a real phase of its own, so it gets its own row rather than borrowing stage 1's. */
+  const rows: { name: string; desc: string; state: string }[] = uploading
+    ? [
+        {
+          name: 'Uploading your files',
+          desc: upload
+            ? `Batch ${upload.batch} of ${upload.batches} · ${sent} of ${batchTotal} sent`
+            : 'Packaging the first batch',
+          state: 'running',
+        },
+        ...STAGES.map((s) => ({ ...s, state: '' })),
+      ]
+    : STAGES.map((s, i) => ({
+        ...s,
+        state: i < stagesDone ? 'done' : i === stagesDone && !terminal ? 'running' : '',
+      }))
+
+  const caption = uploading
+    ? upload
+      ? `Uploading batch ${upload.batch} of ${upload.batches} — ${sent} of ${batchTotal} images sent…`
+      : `Packaging ${batchTotal || 'your'} image${batchTotal === 1 ? '' : 's'} for upload…`
+    : !status
+      ? 'Submitting batch…'
+      : status.state === 'queued'
+        ? 'Queued — waiting for a worker'
+        : status.state === 'failed'
+          ? (status.error?.message ?? 'The job failed.')
+          : status.state === 'cancelled'
+            ? 'Cancelled — images already finished are still available'
+            : terminal
+              ? 'All images processed — packaging output files…'
+              : `Processing image ${Math.min(done + 1, total)} of ${total}…`
 
   return (
-    <div className={`proc-overlay${jobId ? ' open' : ''}`}>
+    <div className="proc-overlay open">
       <div className="proc-modal">
         <div className="proc-modal-header">
           <div className="proc-live-indicator">
@@ -56,7 +107,7 @@ export function ProcessingOverlay({ status, jobId }: { status: JobStatus | null;
             Processing engine
           </div>
           <div className="proc-modal-batch">
-            Batch · <span>{total || '…'}</span> images
+            Batch · <span>{total || batchTotal || '…'}</span> images
           </div>
         </div>
 
@@ -79,7 +130,13 @@ export function ProcessingOverlay({ status, jobId }: { status: JobStatus | null;
                   <span className="proc-pct-sym">%</span>
                 </div>
                 <div className="proc-pct-sub">
-                  {total > 0 ? `${done} of ${total}` : 'complete'}
+                  {uploading
+                    ? batchTotal > 0
+                      ? `${sent} of ${batchTotal} sent`
+                      : 'uploading'
+                    : total > 0
+                      ? `${done} of ${total}`
+                      : 'complete'}
                 </div>
               </div>
             </div>
@@ -88,28 +145,34 @@ export function ProcessingOverlay({ status, jobId }: { status: JobStatus | null;
                 {status.failed} of {total} failed — details on the results page
               </div>
             )}
+            {throttled && !terminal && (
+              // A batch this size will hit vendor rate limits, and a silent slowdown reads as a
+              // stall. Naming the cause is the same principle as the error taxonomy: "the vendor
+              // throttled us" must never look like "the pipeline broke".
+              <div className="proc-throttle-note">
+                A segmentation vendor is rate-limiting us ({status!.rate_limit_events}×). The batch
+                has slowed down automatically and is still running.
+              </div>
+            )}
           </div>
 
           <div className="proc-steps-col">
-            {STAGES.map((s, i) => {
-              const state = i < stagesDone ? 'done' : i === stagesDone && !terminal ? 'running' : ''
-              return (
-                <div className={`psr${state === 'running' ? ' active-step' : ''}`} key={s.name}>
+            {rows.map(({ name, desc, state }) => (
+                <div className={`psr${state === 'running' ? ' active-step' : ''}`} key={name}>
                   <div className={`psr-icon ${state}`}>
                     <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="9" cy="9" r="7" />
                     </svg>
                   </div>
                   <div className="psr-info">
-                    <div className="psr-name">{s.name}</div>
-                    <div className="psr-desc">{s.desc}</div>
+                    <div className="psr-name">{name}</div>
+                    <div className="psr-desc">{desc}</div>
                   </div>
                   <div className={`psr-badge ${state}`}>
                     {state === 'done' ? 'Done' : state === 'running' ? 'Running' : 'Queued'}
                   </div>
                 </div>
-              )
-            })}
+            ))}
             <p className="proc-stage-caption">
               These are the pipeline&rsquo;s fixed stages, shown for context. The API reports progress
               per image rather than per stage, so the percentage above counts finished images — it is
@@ -125,7 +188,29 @@ export function ProcessingOverlay({ status, jobId }: { status: JobStatus | null;
               style={{ width: `${pct}%` }}
             />
           </div>
-          <div className="proc-prog-text">{caption}</div>
+          <div className="proc-prog-row">
+            <div className="proc-prog-text">{caption}</div>
+            {onCancel && !uploading && !terminal && (
+              // A 400-image run costs real money and takes a long time. Before this there was no
+              // way to stop one that was clearly going wrong except closing the tab, which stops
+              // nothing — the worker keeps going and keeps billing.
+              <button
+                type="button"
+                className="proc-cancel-btn"
+                onClick={onCancel}
+                disabled={cancelling}
+                title="Stop after the images already in flight. Finished images stay downloadable."
+              >
+                {cancelling ? 'Cancelling…' : 'Cancel job'}
+              </button>
+            )}
+          </div>
+          {cancelling && (
+            <div className="proc-cancel-note">
+              Stopping after the images already in flight — those are paid for, so they are
+              finished rather than discarded.
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -77,10 +77,33 @@ If a new non-determinism shows up, suspect a library that embeds wall-clock time
 output before suspecting the pipeline's own maths — both bugs here looked like "the algorithm is wrong" before
 turning out to be neither.
 
+## Bulk jobs — rules that are easy to undo by accident
+
+A job is 200–400 images arriving as several archives. Four invariants hold that together; each was
+a measured failure before it was a rule.
+
+1. **Never hold every entry's bytes.** Bulk ingest is `plan_entries` (≤4 KB per entry) then
+   `read_entry` per image. Measured 1 MB versus 317 MB on 60 photos; at 400 that is the difference
+   between working and an OOM. `read_images` still exists for inline jobs and tests — do not reach
+   for it in `jobs.py`.
+2. **Never mint a signed URL at write time.** The TTL is 15 minutes and a bulk job is longer, so
+   the link is dead before anyone clicks it. Assets carry `key`; the API re-signs on read.
+3. **Never save the whole `JobStatus` per image.** It is quadratic in the image count on a record
+   that reaches megabytes. `_ProgressWriter` coalesces; terminal transitions force a flush.
+4. **The cancel flag is its own store key, not a `JobStatus` field.** The worker holds the record
+   in memory and writes it back wholesale, so a field the API set would be overwritten within
+   seconds. This is the normal case, not a rare race.
+
+Both ingest paths must keep sharing one copy of the screening code. A second copy of a security
+screen is how one of them silently falls behind the other.
+
 ## Security musts
 
 - **Zip ingest is the attack surface.** Reject path-traversal entries (zip-slip), cap entry count and total
   uncompressed size (zip bombs), sniff MIME per entry rather than trusting extensions.
+- **Per-archive caps are not enough once a job is several archives.** `MAX_JOB_IMAGES` and
+  `MAX_JOB_UPLOAD_BYTES` bound the accumulated job; without them N uploads multiply through every
+  per-archive guard. A later batch is never a trusted caller.
 - Decompression-bomb guard on individual images; cap max dimension and file size.
 - API keys from env only. Never returned in a response, never logged, never reachable from the browser.
 - Signed short-lived download URLs; no public bucket listing.
@@ -95,6 +118,18 @@ erodes soft edges a little more on every round trip, which is invariant 2), and 
 miss rather than fail the image — a cache is an optimisation, so it may cost money but never correctness.
 
 Per-job spend accumulates into `JobStatus.cost_usd`. There is no separate cost-ledger store yet.
+
+A bulk job makes this a safety concern rather than an accounting one — 400 images on the dual
+pool is ~$24 from an endpoint with no auth. `MAX_JOB_COST_USD` stops a job at its ceiling and
+keeps what it produced. **It reserves each image's projected cost before starting it**, because
+comparing accumulated spend alone does not bind: `cost_usd` only moves when an image *finishes*,
+so a whole concurrency window starts first (measured: six $1 images ran against a $2 ceiling).
+
+Rate limiting is likewise a batch-scale concern. `app/engines/throttle.py` holds one governor per
+vendor for the job; a 429 halves that vendor's concurrency and pauses it for the `Retry-After`,
+and sustained success widens it back. Per-call backoff alone does not help here — with sixteen
+calls in flight, one worker learning the vendor is throttling teaches the other fifteen nothing,
+and the batch burns its whole retry budget in the first few seconds.
 
 ## Style
 

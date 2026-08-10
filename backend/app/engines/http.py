@@ -20,6 +20,7 @@ import httpx
 
 from app.core import errors
 from app.core.settings import Settings
+from app.engines import throttle
 from app.engines.base import AlphaResult, alpha_from_rgba_png
 from app.models import EngineId
 
@@ -189,6 +190,12 @@ class _HttpEngine:
 
         A 429 or 5xx is worth another attempt; a 401 or 400 will fail identically forever, and
         retrying it just burns the demo's time budget.
+
+        Every attempt runs inside `throttle.slot()`. That is what makes a 429 discovered by one
+        image slow the *whole job* rather than only this call — see `app/engines/throttle.py` for
+        why per-call backoff alone collapses at batch scale. With no governor installed (a unit
+        test, or a direct `process_image` call) the slot is a no-op and this behaves exactly as it
+        did before.
         """
         attempts = max(1, self._settings.vendor_max_retries)
         last: errors.PipelineError | None = None
@@ -196,9 +203,14 @@ class _HttpEngine:
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             for attempt in range(attempts):
                 try:
-                    return await self._request(client, image_bytes)
+                    async with throttle.slot(self.id.value):
+                        result = await self._request(client, image_bytes)
                 except errors.PipelineError as exc:
                     last = exc
+                    if isinstance(exc, errors.VendorRateLimited):
+                        await throttle.report_rate_limited(
+                            self.id.value, getattr(exc, "retry_after_seconds", None)
+                        )
                     if not exc.retryable or attempt == attempts - 1:
                         raise
 
@@ -211,6 +223,9 @@ class _HttpEngine:
                     backoff = 0.5 * (2**attempt)
                     delay = min(hinted, _MAX_RETRY_AFTER_S) if hinted is not None else backoff
                     await asyncio.sleep(delay)
+                else:
+                    await throttle.report_success(self.id.value)
+                    return result
 
         raise last or errors.VendorError("request failed with no recorded reason")
 
@@ -237,6 +252,14 @@ class _HttpEngine:
         if status in (401, 403):
             raise errors.VendorUnauthorized(
                 f"{self.id.value} rejected our credentials. Check the key in backend/.env."
+            )
+        if status == 413:
+            # Called out rather than left to the generic VendorError below, which is retryable —
+            # and retrying a 413 re-sends identical bytes for an identical refusal. See
+            # `errors.VendorPayloadTooLarge` and `pipeline._encode_under_budget`.
+            raise errors.VendorPayloadTooLarge(
+                f"{self.id.value} refused the upload as too large. Lower "
+                "VENDOR_MAX_UPLOAD_BYTES so the image is re-encoded smaller before sending."
             )
         if status >= 500:
             raise errors.VendorError(f"{self.id.value} returned a server error ({status}).")

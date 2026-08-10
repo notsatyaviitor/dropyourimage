@@ -76,6 +76,11 @@ Four things to know before demoing it:
 
 - **Cost is per object.** That bedroom was **$0.18** — nine segmentation calls — against $0.02 for
   an ordinary cut-out. A 50-image batch of rooms is not a $1 job.
+- **It will hit vendor rate limits.** One call per object means a nine-object room is a nine-call
+  burst. On 7 Aug 2026 this exhausted the Photoroom free tier mid-session: `"Request was throttled.
+  Expected available in 8705 seconds"` — 2.4 hours, with even a single call refused. The image now
+  fails with `vendor_rate_limited` rather than the misleading "no separable objects were found"
+  it reported before. Budget quota per object, not per image.
 - **The object list is a model's judgement, not a measurement.** Gemini decides what counts as a
   thing. It listed four separate pillows and two plants; a different run may split or merge
   differently. Nothing downstream can tell a wrong list from a right one.
@@ -147,6 +152,60 @@ apply, per layer, without being individually reported.
 - The shadow layer's darkening is proportionally correct but not byte-exact against the raster
   output, due to gamma-space vs linear-light compositing — see `docs/PSD.md` for the measured
   detail.
+
+## Bulk orders (200–400 images) — what works and what to expect
+
+Supported, and verified end to end at 240 images (memory-bounded ingest, correct accounting,
+exact output dimensions). Five things to know before demoing one:
+
+- **It needs a worker.** Memory mode runs jobs inside the HTTP request handler, so anything over
+  `INLINE_JOB_MAX_IMAGES` (25) is refused with `bulk_requires_worker`. `docker compose up -d` plus
+  an `rq worker` is not optional for a bulk demo — start it before the meeting, not during it.
+- **It will hit vendor rate limits, and that is the expected path, not the exception.** 400 images
+  is 800 calls on the dual-engine pool. The job now throttles itself per vendor and reports
+  `rate_limit_events` so the slowdown is visible and attributed, but a throttled batch is a *slow*
+  batch — budget wall-clock accordingly. Photoroom's free tier was measured refusing everything for
+  8705 seconds once exhausted.
+- **Cost is real.** ~$24 for 400 images on Photoroom + fal.ai. The pre-flight estimate and the $25
+  `MAX_JOB_COST_USD` ceiling exist because that is a meaningful fraction of the ~$1,300 POC month.
+  Do not run a full 400-image batch casually to check something.
+- **The spend ceiling is approximate on the multi-object path only.** It reserves one image's pool
+  cost before starting each image, which binds correctly for ordinary packshots. `multi_object`
+  bills per *object* and the object count is unknown until Gemini has enumerated the scene, so a
+  scene-heavy job can overshoot. `CostEstimate.per_object_pricing` flags this rather than hiding it.
+- **The download bundle is one zip of everything.** 400 images across two formats is a
+  multi-gigabyte download. It is assembled through a temp file rather than in memory, so the worker
+  survives it, but the *browser* still has to download it in one piece. There is no per-image or
+  chunked download path; individual assets are downloadable one at a time from the results grid.
+
+Not addressed, and worth naming: there is no resume. If a bulk job dies partway — worker killed,
+Redis restarted — the finished images are still in storage but the job record is what it is, and
+re-running means re-uploading. The cut-out cache means re-running is cheap in vendor spend (same
+bytes, same engine → cache hit), not that it is free in time.
+
+### Large PSD sources change the arithmetic
+
+The client's own test set is **132 PSDs of 130.0 MB each** — 5504×8256 RGB written uncompressed,
+which is why every file is byte-identical in size. Measured on that set:
+
+| | Measured | Consequence |
+|---|---|---|
+| Decode + pipeline | **~45 s/image** at 45.4 MP | a 132-image order is ~1.7 hours, before any vendor call |
+| One order | 16.8 GB uploaded | needs MinIO/S3; memory-mode storage cannot hold it |
+| Per batch | 130 MB/file → 2 files per 256 MB batch | ~66 upload requests for one order, not 3 |
+
+`MAX_IMAGE_BYTES` is `0` (no per-image byte limit) precisely because chasing a number failed
+twice here — 50 MB rejected the whole set, 200 MB then rejected a 260 MB file. `MAX_IMAGE_PIXELS`
+(80 MP) remains the real guard. Two settings *are* still sized against these numbers and are wrong
+if your sources are much larger: `MAX_JOB_UPLOAD_BYTES` (24 GB) and `queue._SECONDS_PER_IMAGE`
+(60 s, which sets the RQ timeout).
+
+**`WORKER_CONCURRENCY` is the one to watch.** At 45 MP, `rgb_linear` alone is 545 MB of float32
+per image, before alpha and the placement buffers. Eight concurrent images is several gigabytes of
+resident numpy. The ingest path is memory-bounded (one archive, one entry at a time), but the
+*pipeline* is not bounded by image size — so on a machine with limited RAM, lower
+`WORKER_CONCURRENCY` for PSD-heavy batches. This is a real ceiling and it has not been tuned
+automatically.
 
 ## No production infrastructure
 
