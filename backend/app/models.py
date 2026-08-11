@@ -240,6 +240,24 @@ class Note(str, Enum):
     alongside a low alpha score so the UI can warn rather than deliver silently.
     """
 
+    SCENE_LARGEST_OBJECT = "scene_largest_object"
+    """The engine returned several separate objects, and only the largest was kept.
+
+    Emitted when a mask would otherwise have been rejected as fragmented — a furnished-room
+    photograph where segmentation correctly found five fixtures, none of them "the product".
+    Rather than failing the image, the largest connected object is isolated and the rest are
+    discarded, so the job delivers something instead of nothing.
+
+    **This is a guess, and the UI must say so.** Largest is not the same as wanted: on a bathroom
+    interior the biggest object is the washbasin, which is only right if the basin is what the
+    order was for. `cutout.subject_prompt` is the accurate path and always beats this — name the
+    object and the whole recovery is skipped.
+
+    Deterministic and free: connected components on the alpha support, no model and no extra vendor
+    call. Soft edges survive because the components are labelled on `alpha > 0.05` rather than on
+    the binary core, so the kept object keeps its full transition band (invariant 2).
+    """
+
     MULTI_OBJECT = "multi_object"
     """The scene was split into one PSD layer per object rather than a single cut-out.
 

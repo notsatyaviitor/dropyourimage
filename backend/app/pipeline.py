@@ -34,6 +34,7 @@ from app.imaging import formats as F
 from app.imaging import geometry as G
 from app.imaging import shadow as S
 from app.models import (
+    EngineCandidate,
     EngineId,
     ImageResult,
     ImageState,
@@ -106,9 +107,7 @@ async def process_image(
 
         if alpha is None:
             result.state = ImageState.FAILED
-            result.error = errors.VendorError(
-                "Every segmentation engine returned an unusable mask for this image."
-            ).to_info()
+            result.error = errors.NoForegroundFound(_no_usable_mask_message(candidates)).to_info()
             return result, {}
 
         rgb, ratio, uniformity, stage2_notes = _stage2_shadow_and_edges(
@@ -199,6 +198,28 @@ def _check_output_size(config: JobConfig, settings: Settings) -> None:
             f"Requested canvas is {pixels // 1_000_000} MP; this deployment allows up to "
             f"{settings.max_output_pixels // 1_000_000} MP."
         )
+
+
+def _no_usable_mask_message(candidates: list[EngineCandidate]) -> str:
+    """Say *why* every candidate was rejected, not just that they were.
+
+    The reasons come from `autopick.measure` and are the only actionable thing in this failure —
+    "mask is fragmented (largest blob 52%)" means the frame is a scene with no single subject, and
+    the fix is the Subject field. A bare "unusable mask" sends the user to retry instead, which
+    re-bills the vendor for a byte-identical rejection.
+
+    The engine name is included because with a dual pool the two can be rejected for different
+    reasons, and "photoroom said X, gemini said Y" is what makes that visible.
+    """
+    reasons = [
+        f"{c.engine.value}: {c.rejected_reason}" for c in candidates if c.rejected_reason
+    ]
+    detail = f" ({'; '.join(reasons)})" if reasons else ""
+    return (
+        "No usable cut-out could be found in this image"
+        f"{detail}. If the photograph is a scene rather than a single product, name the object "
+        "you want in the Subject field."
+    )
 
 
 def _decode(

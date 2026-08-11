@@ -210,6 +210,76 @@ class TestScoring:
             assert 0.0 <= autopick.measure(result(mask)).score <= 1.0
 
 
+def two_discs(size: int = 200, big: int = 34, small: int = 30) -> np.ndarray:
+    """Two separated soft discs of similar size: a scene with more than one object.
+
+    Sized so the larger holds ~56% of the mask, under `_MIN_SOLIDITY` (60%) — `measure` rejects it
+    as fragmented. That is the shape of the real furnished-room mask this exists for, where the
+    biggest of five fixtures held 52%.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    a = np.zeros((size, size), np.float32)
+    for cx, cy, r in ((size * 0.30, size * 0.35, big), (size * 0.75, size * 0.75, small)):
+        d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        a = np.maximum(a, np.clip(r - d + 0.5, 0.0, 1.0))
+    return a.astype(np.float32)
+
+
+class TestSceneRecovery:
+    """A mask holding several objects delivers its largest rather than failing the image.
+
+    Measured on a real customer file: a 45 MP CR3 of a bathroom, where Photoroom returned five
+    correct fixtures (washbasin 52%, bath 23%, mirror 18%, flush plate, shelf) and auto-pick
+    rejected the lot as fragmented. Failing was honest but useless — the order got nothing.
+    """
+
+    def test_a_two_object_mask_is_rejected_before_recovery(self):
+        m = autopick.measure(result(two_discs()))
+        assert m.reject is autopick._Reject.FRAGMENTED
+
+    def test_choose_now_delivers_the_largest_object(self):
+        v = autopick.choose([result(two_discs())])
+        assert v.winner is not None
+        assert Note.SCENE_LARGEST_OBJECT in v.notes
+
+    def test_the_smaller_object_is_gone_and_the_larger_survives(self):
+        kept = autopick.keep_largest_object(two_discs())
+        assert kept is not None
+        assert kept[150, 150] == 0.0, "the small disc should have been discarded"
+        assert kept[70, 60] > 0.9, "the large disc should be untouched"
+
+    def test_soft_edges_survive_isolation(self):
+        """Invariant 2: labelling on the core rather than the support would hard-edge the keeper."""
+        kept = autopick.keep_largest_object(two_discs())
+        assert kept is not None
+        soft = ((kept > 0.05) & (kept < 0.95)).sum()
+        assert soft > 0, "the kept object lost its transition band"
+
+    def test_a_single_object_mask_is_left_alone(self):
+        assert autopick.keep_largest_object(disc_mask()) is None
+
+    def test_an_empty_mask_is_not_rescued(self):
+        """Only fragmentation is recoverable — isolating a blob of nothing invents an answer."""
+        v = autopick.choose([result(np.zeros((50, 50), dtype=np.float32))])
+        assert v.winner is None
+        assert Note.SCENE_LARGEST_OBJECT not in v.notes
+
+    def test_an_inverted_mask_is_not_rescued(self):
+        v = autopick.choose([result(np.ones((50, 50), dtype=np.float32))])
+        assert v.winner is None
+        assert Note.SCENE_LARGEST_OBJECT not in v.notes
+
+    def test_a_good_mask_never_reaches_recovery(self):
+        v = autopick.choose([result(disc_mask())])
+        assert Note.SCENE_LARGEST_OBJECT not in v.notes
+
+    def test_recovery_is_deterministic(self):
+        a = two_discs()
+        first = autopick.keep_largest_object(a)
+        second = autopick.keep_largest_object(a)
+        assert np.array_equal(first, second)
+
+
 class TestChoose:
     def test_no_candidates_yields_no_winner(self):
         v = autopick.choose([])

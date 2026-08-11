@@ -98,6 +98,7 @@ export type Note =
   | 'subject_located'
   | 'subject_not_found'
   | 'busy_scene'
+  | 'scene_largest_object'
   | 'hard_edged_mask'
   | 'vendor_downscaled'
   | 'format_substituted'
@@ -120,6 +121,8 @@ export const NOTE_LABELS: Record<Note, string> = {
     'The subject prompt matched nothing, so the whole frame was segmented — on a multi-object scene this very likely cut out the wrong object.',
   busy_scene:
     'The background is not a uniform studio backdrop. This pipeline is built for packshots; the cut-out may be of the wrong object. Try a subject prompt.',
+  scene_largest_object:
+    'Several separate objects were found and only the largest was kept. Largest is not the same as wanted — name the object in the Subject field to choose it properly.',
   tiebreak_vision:
     'Candidates scored equal; a vision model judged which was better. A judgement, not a measurement — and the only step that can differ between runs.',
   multi_object:

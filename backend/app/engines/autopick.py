@@ -17,6 +17,7 @@ Everything above it is measurement.
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 
 import cv2
@@ -29,6 +30,24 @@ from app.models import EngineCandidate, EngineId, Note
 _MIN_COVERAGE = 0.001      # an empty mask found nothing
 _MAX_COVERAGE = 0.995      # a full mask removed nothing
 _MIN_SOLIDITY = 0.60       # largest blob's share of total mask area; below this it is confetti
+
+# Alpha above this counts as "part of an object" when labelling connected components. Deliberately
+# far below 0.5: the soft transition band belongs to the object it surrounds, and labelling on the
+# binary core instead would cut every kept object's edge back to the 0.5 contour — invariant 2.
+_SUPPORT_THRESHOLD = 0.05
+
+
+class _Reject(enum.Enum):
+    """Why a mask was rejected, as a value rather than prose.
+
+    `rejected_reason` stays human-readable for the UI; this is what code branches on. Only
+    `FRAGMENTED` is recoverable — the others describe a mask with nothing worth salvaging.
+    """
+
+    EMPTY = "empty"
+    FULL_FRAME = "full_frame"
+    INVERTED = "inverted"
+    FRAGMENTED = "fragmented"
 
 # --- scoring ----------------------------------------------------------------------------
 # Target average edge width in pixels. A hard binary mask sits near 0 and looks cut out with
@@ -60,6 +79,7 @@ class _Measured:
     score: float
     soft_alpha_ratio: float
     rejected_reason: str | None
+    reject: _Reject | None = None
 
     def to_candidate(self) -> EngineCandidate:
         return EngineCandidate(
@@ -81,20 +101,25 @@ def measure(result: AlphaResult) -> _Measured:
     soft_ratio = float(((a > 0.05) & (a < 0.95)).sum()) / total_px
 
     if coverage < _MIN_COVERAGE:
-        return _Measured(result, 0.0, soft_ratio, "empty mask - nothing detected")
+        return _Measured(result, 0.0, soft_ratio, "empty mask - nothing detected", _Reject.EMPTY)
     if coverage > _MAX_COVERAGE:
-        return _Measured(result, 0.0, soft_ratio, "mask covers the whole frame - nothing removed")
+        return _Measured(
+            result, 0.0, soft_ratio,
+            "mask covers the whole frame - nothing removed", _Reject.FULL_FRAME,
+        )
 
     core = (a > 0.5).astype(np.uint8)
     if _touches_all_four_edges(core):
         return _Measured(
-            result, 0.0, soft_ratio, "mask reaches all four edges - probably inverted"
+            result, 0.0, soft_ratio,
+            "mask reaches all four edges - probably inverted", _Reject.INVERTED,
         )
 
     solidity = _largest_component_share(core)
     if solidity < _MIN_SOLIDITY:
         return _Measured(
-            result, 0.0, soft_ratio, f"mask is fragmented (largest blob {solidity:.0%})"
+            result, 0.0, soft_ratio,
+            f"mask is fragmented (largest blob {solidity:.0%})", _Reject.FRAGMENTED,
         )
 
     score = (
@@ -103,6 +128,68 @@ def measure(result: AlphaResult) -> _Measured:
         + _W_COVERAGE * _coverage_plausibility(coverage)
     )
     return _Measured(result, float(np.clip(score, 0.0, 1.0)), soft_ratio, None)
+
+
+def keep_largest_object(alpha: np.ndarray) -> np.ndarray | None:
+    """Zero every separate object in `alpha` except the biggest, or None if there is only one.
+
+    The rescue for a scene that segmented into several correct objects when the order wanted one.
+    Deterministic — connected components, no model, no vendor call, no cost.
+
+    Two details that matter:
+
+    * **Components are labelled on the alpha *support* (> 0.05), not on the binary core (> 0.5).**
+      An object's soft transition band lies outside its own core, so labelling on the core would
+      slice every kept edge back to the 0.5 contour and hard-edge it — the permanent damage
+      `backend/CLAUDE.md` invariant 2 exists to prevent. Labelling on the support keeps the whole
+      band attached to the object it belongs to.
+    * **Components are ranked by core area, not support area.** A large diffuse halo can outweigh a
+      small solid product on support alone, which would pick the haze over the object.
+    """
+    a = np.asarray(alpha, dtype=np.float32)
+    support = (a > _SUPPORT_THRESHOLD).astype(np.uint8)
+    count, labels = cv2.connectedComponents(support, connectivity=8)
+    if count <= 2:  # label 0 is background, so this is one object or none: nothing to isolate
+        return None
+
+    core = a > 0.5
+    areas = [(int((core & (labels == lbl)).sum()), lbl) for lbl in range(1, count)]
+    best_area, best_label = max(areas)
+    if best_area <= 0:
+        return None
+
+    return np.where(labels == best_label, a, 0.0).astype(np.float32)
+
+
+def _recover_fragmented(measured: list[_Measured]) -> list[_Measured]:
+    """Re-measure fragmented candidates with only their largest object kept.
+
+    Only `FRAGMENTED` is attempted. The other rejections describe a mask with nothing to salvage —
+    isolating the largest blob of an inverted or empty mask just produces a confident wrong answer,
+    which is worse than failing.
+
+    A candidate that still fails after isolation is dropped, so this can only turn a failure into a
+    delivery, never a good mask into a worse one.
+    """
+    recovered: list[_Measured] = []
+    for m in measured:
+        if m.reject is not _Reject.FRAGMENTED:
+            continue
+        isolated = keep_largest_object(m.result.alpha)
+        if isolated is None:
+            continue
+        again = measure(
+            AlphaResult(
+                alpha=isolated,
+                engine=m.result.engine,
+                latency_ms=m.result.latency_ms,
+                cost_usd=m.result.cost_usd,
+                cache_hit=m.result.cache_hit,
+            )
+        )
+        if again.rejected_reason is None:
+            recovered.append(again)
+    return recovered
 
 
 def _touches_all_four_edges(core: np.ndarray) -> bool:
@@ -171,7 +258,16 @@ def choose(results: list[AlphaResult]) -> Verdict:
     candidates = [m.to_candidate() for m in measured]
 
     if not usable:
-        return Verdict(winner=None, candidates=candidates, notes=notes)
+        # Last resort before failing the image: a mask rejected only for holding several objects
+        # still contains a usable one. Keep the largest and say loudly that we guessed — a scene
+        # photograph delivered as its biggest object beats delivering nothing, but it is a guess,
+        # and `cutout.subject_prompt` is the accurate answer whenever the caller knows it.
+        recovered = _recover_fragmented(measured)
+        if not recovered:
+            return Verdict(winner=None, candidates=candidates, notes=notes)
+        notes.append(Note.SCENE_LARGEST_OBJECT)
+        usable = recovered
+        candidates = [m.to_candidate() for m in recovered]
 
     usable.sort(key=lambda m: m.score, reverse=True)
     best = usable[0]

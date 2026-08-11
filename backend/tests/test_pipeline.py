@@ -14,12 +14,15 @@ from PIL import Image
 
 from app import pipeline
 from app.core.settings import Settings
+from app.engines.base import AlphaResult
 from app.engines.local import LocalEngine
 from app.imaging import color as C
 from app.imaging import export as E
 from app.models import (
     BackgroundSpec,
     CentringSpec,
+    EngineId,
+    ErrorCode,
     ExportSpec,
     ImageState,
     JobConfig,
@@ -261,6 +264,64 @@ class TestFailureHandling:
         )
         assert result.error is not None
         assert "SECRET" not in result.error.message
+
+
+class TestNoUsableMask:
+    """Every engine answered, but auto-pick rejected every mask.
+
+    Measured on a real customer file: a 45 MP Canon CR3 of a bathroom interior. Photoroom returned
+    a mask and billed $0.02; auto-pick rejected it as "fragmented (largest blob 52%)" because a
+    furnished room has no single subject. That is a property of the photograph, so it must not be
+    reported as a vendor fault the user should retry — retrying re-sends byte-identical pixels,
+    gets the byte-identical rejection, and bills again. Same reasoning as `NoForegroundFound` and
+    `VendorPayloadTooLarge` in app/core/errors.py, which were split out for exactly this.
+    """
+
+    class FragmentedEngine:
+        """Returns speckle: real coverage, but no dominant blob. Rejected by solidity."""
+
+        id = EngineId.LOCAL
+        cost_per_image_usd = 0.02
+
+        def available(self) -> bool:
+            return True
+
+        async def alpha_for(self, image_bytes: bytes, width: int, height: int):
+            alpha = np.zeros((height, width), dtype=np.float32)
+            alpha[::4, ::4] = 1.0
+            return AlphaResult(alpha=alpha, engine=self.id, latency_ms=1, cost_usd=0.02)
+
+    @pytest.fixture
+    def fragmented(self):
+        return [self.FragmentedEngine()]
+
+    async def test_it_is_not_reported_as_a_retryable_vendor_error(self, settings, fragmented):
+        result, outputs = await pipeline.process_image(
+            studio_png(), "scene.png", JobConfig(), settings, engines=fragmented
+        )
+        assert result.state is ImageState.FAILED
+        assert outputs == {}
+        assert result.error is not None
+        assert result.error.code is ErrorCode.NO_FOREGROUND_FOUND
+        assert result.error.retryable is False, "the same bytes fail identically every time"
+
+    async def test_the_message_carries_the_reason_and_the_way_out(self, settings, fragmented):
+        result, _ = await pipeline.process_image(
+            studio_png(), "scene.png", JobConfig(), settings, engines=fragmented
+        )
+        assert result.error is not None
+        # The rejection reason from autopick, not just "unusable" — it is the only actionable
+        # thing in this failure.
+        assert "fragmented" in result.error.message
+        assert "Subject" in result.error.message
+
+    async def test_the_spend_is_still_recorded(self, settings, fragmented):
+        """The vendor answered and billed. A failed image that cost money must say so."""
+        result, _ = await pipeline.process_image(
+            studio_png(), "scene.png", JobConfig(), settings, engines=fragmented
+        )
+        assert result.cost_usd == pytest.approx(0.02)
+        assert result.candidates[0].rejected_reason is not None
 
 
 class TestPreCutInput:

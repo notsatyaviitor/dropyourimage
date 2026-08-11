@@ -211,6 +211,7 @@ The frontend renders every one of these; never swallow one silently (see `fronte
 | `subject_located` | A subject prompt isolated one object; only that region was segmented |
 | `subject_not_found` | Subject prompt matched nothing — whole frame segmented, very likely the wrong object |
 | `busy_scene` | Backdrop is not a uniform studio sweep; the cut-out may be of the wrong object |
+| `scene_largest_object` | The mask held several separate objects, so only the largest was kept rather than failing the image. **A guess** — largest is not the same as wanted. Deterministic (connected components), free, and skipped entirely when `cutout.subject_prompt` is set |
 | `hard_edged_mask` | Cut out by an engine that returns a boundary, not a coverage field — no soft alpha, so edge decontamination had nothing to correct. Emitted for `gemini` |
 | `vendor_downscaled` | Too large to send the vendor at full resolution, so the mask was computed on a reduced copy and scaled back up. **Only mask precision is affected** — engines return alpha, never colour, and the composite uses the full-resolution original — but edges are softer. Only emitted when a lossless re-encode was not enough on its own |
 | `multi_object` | The scene was split into one PSD layer per object; `ImageResult.layers` names them |

@@ -47,7 +47,10 @@ const ERROR_COPY: Record<string, string> = {
   vendor_unauthorized: 'A vendor API key is missing or was rejected',
   vendor_out_of_credits: 'The engine account is out of credits — top it up to continue',
   vendor_payload_too_large: 'The image was too large for the segmentation service to accept',
-  no_foreground_found: 'No subject could be found to cut out — try more padding, or a different subject',
+  // Deliberately does NOT say "try a different subject": this fires most often when no subject was
+  // named at all, and copy presuming one sends the reader looking for a setting they never set.
+  // The API's `message` carries the specific remedy — name the object, or widen the padding.
+  no_foreground_found: 'No subject could be found to cut out',
   vendor_error: 'The segmentation service returned an error',
   unsupported_file: 'Not a supported image file',
   file_too_large: 'File exceeds the size limit',
@@ -64,6 +67,8 @@ const CRITICAL_NOTES: Partial<Record<Note, string>> = {
     'The subject you named was not found, so the whole frame was cut out — very likely the wrong object.',
   busy_scene:
     'This looks like a scene rather than a packshot. The cut-out may be of the wrong object — name it in the Subject field.',
+  scene_largest_object:
+    'Several objects were found here and only the largest was kept — this may not be the one you wanted. Name it in the Subject field to pick it properly.',
   alpha_suspect: 'The cut-out scored low on automatic checks. Look closely before using it.',
   hard_edged_mask:
     'Cut out by Gemini, which returns a polygon — this edge is hard, with no soft alpha. Expect a halo against saturated background colours. Re-run with Photoroom for a soft edge.',
