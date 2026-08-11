@@ -1014,6 +1014,85 @@ class TestSourceFormatOnly:
         tiff = [o["format"] for o in by_name["c.tiff"]["outputs"]]
         assert "png" in tiff and "tiff" in tiff
 
+    async def test_a_raw_upload_gets_its_original_back_in_the_bundle(self, client, monkeypatch):
+        """Camera raw has no encoder anywhere, so `match_source` can only ever substitute TIFF.
+
+        The original is shipped alongside so the delivered folder does contain the `.nef` the
+        order was placed with. It is the untouched source and carries no cut-out — that is what
+        `format_substituted` on the result says.
+        """
+        self._stub_libraw(monkeypatch)
+        # Sniffs as binary rather than text, which ingest rejects. Content is irrelevant:
+        # libraw is stubbed, and the point is that these exact bytes come back.
+        raw_bytes = bytes(range(256)) * 8
+
+        r = await upload(
+            client,
+            zip_of({"shot.nef": raw_bytes}),
+            config={"export": {"formats": [], "match_source": True}},
+        )
+        status = (await client.get(f"/jobs/{r.json()['job_id']}")).json()
+        assert status["images"][0]["state"] == "done"
+
+        bundle = await client.get(status["bundle_url"])
+        zf = zipfile.ZipFile(io.BytesIO(bundle.content))
+        names = sorted(zf.namelist())
+
+        assert names == ["shot.nef", "shot.tiff"], "the substitute AND the original"
+        assert zf.read("shot.nef") == raw_bytes, "byte-identical to what was uploaded"
+
+    async def test_the_original_is_left_out_when_same_format_was_not_asked_for(
+        self, client, monkeypatch
+    ):
+        """A PNG-only order must not collect a 130 MB raw it never requested."""
+        self._stub_libraw(monkeypatch)
+        r = await upload(
+            client,
+            zip_of({"shot.nef": bytes(range(256)) * 8}),
+            config={"export": {"formats": ["png"], "match_source": False}},
+        )
+        status = (await client.get(f"/jobs/{r.json()['job_id']}")).json()
+        bundle = await client.get(status["bundle_url"])
+
+        assert zipfile.ZipFile(io.BytesIO(bundle.content)).namelist() == ["shot.png"]
+
+    async def test_a_writable_source_does_not_get_a_duplicate_original(self, client):
+        """PNG round-trips, so its 'original' would just be a second copy of the same format."""
+        r = await upload(
+            client, zip_of({"a.png": tiny_png()}),
+            config={"export": {"formats": [], "match_source": True}},
+        )
+        status = (await client.get(f"/jobs/{r.json()['job_id']}")).json()
+        bundle = await client.get(status["bundle_url"])
+
+        assert zipfile.ZipFile(io.BytesIO(bundle.content)).namelist() == ["a.png"]
+
+    @staticmethod
+    def _stub_libraw(monkeypatch):
+        """No camera files exist in the repo and none may be added — see tests/test_formats.py."""
+        import sys
+        import types
+
+        class FakeRaw:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def postprocess(self, **kw):
+                # Needs a real figure/ground split: the offline control engine keys on the
+                # backdrop, so a flat frame fails as no_foreground_found and never reaches
+                # the bundle at all.
+                frame = np.full((48, 48, 3), 62000, np.uint16)
+                frame[14:34, 14:34, :] = 9000
+                return frame
+
+        module = types.ModuleType("rawpy")
+        module.imread = lambda _fh: FakeRaw()
+        module.ColorSpace = types.SimpleNamespace(sRGB="sRGB")
+        monkeypatch.setitem(sys.modules, "rawpy", module)
+
     async def test_asking_for_nothing_at_all_is_rejected(self, client):
         """Empty formats AND match_source off would deliver zero files — a 422, not a silent no-op."""
         r = await upload(

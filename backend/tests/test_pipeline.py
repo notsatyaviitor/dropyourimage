@@ -266,6 +266,65 @@ class TestFailureHandling:
         assert "SECRET" not in result.error.message
 
 
+class TestMatchSourceSize:
+    """`size.match_source` delivers at the source photograph's own pixel dimensions.
+
+    Exists because "the output is less sharp than what I sent" is almost never the resampler — it
+    is the canvas. A 50.6 MP raw (8688x5820) asked for at the 500x500 default keeps 0.49% of its
+    pixels, and no filter recovers that. The only fix is to stop throwing them away.
+    """
+
+    async def test_the_canvas_matches_the_source_dimensions(self, settings, engines):
+        blob = studio_png(size=137)  # deliberately not square and not a round number
+        result, outputs = await pipeline.process_image(
+            blob, "a.png", JobConfig(size=SizeSpec(match_source=True)), settings, engines=engines
+        )
+        assert result.state is ImageState.DONE
+        assert pixels(outputs[OutputFormat.PNG]).shape[:2] == (137, 137)
+        assert result.source_size == (137, 137)
+
+    async def test_width_and_height_are_ignored_when_it_is_on(self, settings, engines):
+        result, outputs = await pipeline.process_image(
+            studio_png(size=90),
+            "a.png",
+            JobConfig(size=SizeSpec(width=500, height=500, match_source=True)),
+            settings,
+            engines=engines,
+        )
+        assert pixels(outputs[OutputFormat.PNG]).shape[:2] == (90, 90)
+
+    async def test_off_by_default_so_existing_jobs_are_unchanged(self, settings, engines):
+        result, outputs = await pipeline.process_image(
+            studio_png(size=90), "a.png", JobConfig(), settings, engines=engines
+        )
+        assert pixels(outputs[OutputFormat.PNG]).shape[:2] == (500, 500)
+
+    async def test_it_cannot_be_used_to_dodge_the_output_pixel_limit(self, engines):
+        """A huge source must still be refused by code rather than allocating its way to an OOM."""
+        tight = Settings(
+            photoroom_api_key="", removebg_api_key="", fal_key="", gemini_api_key="",
+            adobe_client_id="", max_output_pixels=1000,
+        )
+        result, outputs = await pipeline.process_image(
+            studio_png(size=200), "a.png", JobConfig(size=SizeSpec(match_source=True)),
+            tight, engines=engines,
+        )
+        assert result.state is ImageState.FAILED
+        assert result.error is not None
+        assert result.error.code is ErrorCode.OUTPUT_TOO_LARGE
+        assert outputs == {}
+
+    def test_resolving_clamps_a_source_beyond_the_contract_axis_bound(self):
+        """SizeSpec caps an axis at 20000; a source may exceed it, and must not produce one."""
+        resolved = pipeline._resolve_size(SizeSpec(match_source=True), (40000, 10))
+        assert resolved.width == 20000
+        assert resolved.height == 10
+
+    def test_resolving_is_a_no_op_when_off(self):
+        original = SizeSpec(width=800, height=600)
+        assert pipeline._resolve_size(original, (123, 456)) == original
+
+
 class TestNoUsableMask:
     """Every engine answered, but auto-pick rejected every mask.
 

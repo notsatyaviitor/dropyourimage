@@ -42,6 +42,7 @@ from app.models import (
     Note,
     OutputFormat,
     ShadowMode,
+    SizeSpec,
     SourceFormat,
 )
 
@@ -83,7 +84,8 @@ async def process_image(
 
         decoded = _decode(image_bytes, settings, source_format)
         result.source_size = decoded.source_size
-        _check_output_size(config, settings)
+        size = _resolve_size(config.size, decoded.source_size)
+        _check_output_size(size, settings)
 
         formats, format_notes = _resolve_formats(config, source_format)
         result.notes.extend(format_notes)
@@ -93,7 +95,7 @@ async def process_image(
         # N masks, no single subject to centre on, and no shadow reconstruction.
         if config.cutout.multi_object:
             return await _multi_object_image(
-                result, image_bytes, decoded, config, settings, engines, cache, formats
+                result, image_bytes, decoded, config, settings, engines, cache, formats, size
             )
 
         alpha, notes, candidates, cost, chosen, cache_hit = await _stage1_cutout(
@@ -116,7 +118,7 @@ async def process_image(
         result.notes.extend(stage2_notes)
         result.background_uniformity = uniformity
 
-        placement = G.place_on_canvas(rgb, alpha, config.size, config.centring, shadow_ratio=ratio)
+        placement = G.place_on_canvas(rgb, alpha, size, config.centring, shadow_ratio=ratio)
         result.notes.extend(placement.notes)
         result.centroid_offset_px = placement.centroid_offset_px
 
@@ -179,7 +181,27 @@ def _looks_like_a_scene(result: ImageResult, config: JobConfig) -> bool:
     return bool(scores) and max(scores) < _SCENE_MAX_SCORE
 
 
-def _check_output_size(config: JobConfig, settings: Settings) -> None:
+def _resolve_size(size: SizeSpec, source_size: tuple[int, int]) -> SizeSpec:
+    """Fill in the canvas dimensions when the job asked for the source's own.
+
+    Resolved once, here, so every stage downstream sees a `SizeSpec` with concrete numbers and
+    nothing else has to know the option exists — `place_on_canvas` still guarantees exact output
+    dimensions, and `_check_output_size` still bounds the allocation.
+
+    The source can exceed `SizeSpec`'s 20000-per-axis contract bound (a stitched panorama would),
+    so the axes are clamped. That is a real ceiling rather than a silent shrink: the pixel-count
+    guard below rejects anything genuinely too large, and clamping only bites past 20000 px, which
+    no camera raw reaches.
+    """
+    if not size.match_source:
+        return size
+    width, height = source_size
+    return size.model_copy(
+        update={"width": min(max(width, 1), 20000), "height": min(max(height, 1), 20000)}
+    )
+
+
+def _check_output_size(size: SizeSpec, settings: Settings) -> None:
     """Reject a canvas whose *total* pixel count is beyond what this deployment will allocate.
 
     `SizeSpec` bounds each axis independently (1..20000), which leaves 20000x20000 = 400 MP valid.
@@ -192,7 +214,7 @@ def _check_output_size(config: JobConfig, settings: Settings) -> None:
     `SizeSpec` validator because it is a deployment limit, not a contract rule: a bigger machine
     can raise it without the frozen contract changing.
     """
-    pixels = config.size.width * config.size.height
+    pixels = size.width * size.height
     if pixels > settings.max_output_pixels:
         raise errors.OutputTooLarge(
             f"Requested canvas is {pixels // 1_000_000} MP; this deployment allows up to "
@@ -571,6 +593,7 @@ async def _multi_object_image(
     engines: list[BackgroundRemover] | None,
     cache: CutoutCache | None,
     formats: list[OutputFormat],
+    size: SizeSpec,
 ) -> tuple[ImageResult, dict[OutputFormat, bytes]]:
     """A scene delivered as one PSD layer per object.
 
@@ -601,7 +624,7 @@ async def _multi_object_image(
         ).to_info()
         return result, {}
 
-    rgb_canvas, placed, _scale = _fit_layers_to_canvas(decoded, layers, config)
+    rgb_canvas, placed, _scale = _fit_layers_to_canvas(decoded, layers, config, size)
     result.layers = [l.name for l in placed]
     result.chosen_engine = pool[0].id if pool else None
 
@@ -732,7 +755,7 @@ async def _segment_objects(
 
 
 def _fit_layers_to_canvas(
-    decoded: E.DecodedImage, layers: list[ObjectLayer], config: JobConfig
+    decoded: E.DecodedImage, layers: list[ObjectLayer], config: JobConfig, size: SizeSpec
 ) -> tuple[np.ndarray, list[ObjectLayer], float]:
     """Scale the whole frame onto the canvas, moving every object mask identically.
 
@@ -741,12 +764,12 @@ def _fit_layers_to_canvas(
     centring the bed would slide every other layer out of register with it. So the frame is fitted
     as a unit and each mask rides along with it.
     """
-    out_w, out_h = config.size.width, config.size.height
+    out_w, out_h = size.width, size.height
     src_h, src_w = decoded.rgb_linear.shape[:2]
 
-    margin = 1.0 - (config.size.margin_pct / 100.0) * 2.0
+    margin = 1.0 - (size.margin_pct / 100.0) * 2.0
     scale = min(out_w / src_w, out_h / src_h) * max(margin, 0.05)
-    if scale > 1.0 and not config.size.allow_upscale:
+    if scale > 1.0 and not size.allow_upscale:
         scale = 1.0
 
     new_w = max(1, int(round(src_w * scale)))

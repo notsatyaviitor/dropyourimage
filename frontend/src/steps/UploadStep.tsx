@@ -354,7 +354,14 @@ export function UploadStep({
             v={config.background.transparent ? 'transparent' : (config.background.color ?? '—')}
           />
           <Detail k="Shadow" v={config.background.shadow} />
-          <Detail k="Output size" v={`${config.size.width} × ${config.size.height} px`} />
+          <Detail
+            k="Output size"
+            v={
+              config.size.match_source
+                ? 'original resolution of each image'
+                : `${config.size.width} × ${config.size.height} px`
+            }
+          />
           <Detail k="Centring" v={config.centring.mode === 'bbox' ? 'bounding box' : 'centre of mass'} />
           <Detail k="Formats" v={config.export.formats.map((f) => f.toUpperCase()).join(', ')} />
           <Detail k="Profile" v={config.export.profile === 'srgb' ? 'sRGB' : 'Adobe RGB'} />

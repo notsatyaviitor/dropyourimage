@@ -336,4 +336,4 @@ class TestOutputSizeGuard:
 
     def test_the_guard_raises_the_typed_error_directly(self, settings):
         with pytest.raises(errors.OutputTooLarge):
-            pipeline._check_output_size(JobConfig(size=SizeSpec(width=20000, height=20000)), settings)
+            pipeline._check_output_size(SizeSpec(width=20000, height=20000), settings)

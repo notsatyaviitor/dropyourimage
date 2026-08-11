@@ -183,7 +183,7 @@ async def run_job_async(
 
     status.rate_limit_events = job_throttle.rate_limit_events()
     _record_unprocessed(status, plans, stop)
-    _finalise(status, job_id, storage, store, settings, progress, stop)
+    _finalise(status, job_id, config, storage, store, settings, progress, stop)
     return status
 
 
@@ -528,6 +528,7 @@ def _attach_outputs(
 def _finalise(
     status: JobStatus,
     job_id: str,
+    config: JobConfig,
     storage: StorageBackend,
     store: JobStore,
     settings: Settings,
@@ -544,7 +545,7 @@ def _finalise(
 
     if done:
         key = job_key(job_id, BUNDLE_KEY)
-        _write_bundle(done, job_id, key, storage)
+        _write_bundle(done, job_id, key, storage, status, config, settings)
         status.bundle_key = key
         status.bundle_url = storage.signed_url(key, settings.signed_url_ttl_seconds)
 
@@ -573,7 +574,13 @@ def _finalise(
 
 
 def _write_bundle(
-    done: list[ImageResult], job_id: str, key: str, storage: StorageBackend
+    done: list[ImageResult],
+    job_id: str,
+    key: str,
+    storage: StorageBackend,
+    status: JobStatus,
+    config: JobConfig,
+    settings: Settings,
 ) -> None:
     """Assemble the download zip through a temp file rather than in memory.
 
@@ -603,8 +610,66 @@ def _write_bundle(
                     except KeyError:
                         continue
 
+            _add_unwritable_originals(bundle, done, job_id, storage, status, config, settings)
+
         scratch.seek(0)
         storage.put(key, scratch.read(), "application/zip")
+
+
+def _add_unwritable_originals(
+    bundle: zipfile.ZipFile,
+    done: list[ImageResult],
+    job_id: str,
+    storage: StorageBackend,
+    status: JobStatus,
+    config: JobConfig,
+    settings: Settings,
+) -> None:
+    """Put the untouched upload in the bundle for sources whose format cannot be written.
+
+    Camera raw (CRW/CR2/CR3/DNG/NEF/RAW) has no encoder in any library, so `match_source` can only
+    ever substitute 16-bit TIFF for it — which reads as "my NEF never came back". Shipping the
+    original alongside means the delivered folder does contain the `.nef` the order was placed
+    with. It is the *source*, not a processed asset, and cannot carry the cut-out: that is a fact
+    about the format, and `Note.FORMAT_SUBSTITUTED` on the result already states it.
+
+    Only when `export.match_source` asked for same-format-out. A job that specified PNG only
+    should not have a 130 MB raw appear in its download.
+
+    Copied entry by entry straight from the stored upload archives, so nothing is duplicated in
+    object storage and at most one original is in memory at a time — the same rule the ingest path
+    follows (`backend/CLAUDE.md`, bulk invariant 1).
+    """
+    if not config.export.match_source:
+        return
+
+    from app.imaging import formats as F
+
+    wanted = {
+        image.source_name
+        for image in done
+        if image.source_format is not None and not F.can_round_trip(image.source_format)
+    }
+    if not wanted:
+        return
+
+    for archive_key in _batch_keys(job_id, status, storage):
+        if not wanted:
+            break
+        data = storage.get(archive_key)
+        try:
+            with zip_reader.open_archive(data, settings) as archive:
+                planned, _ = zip_reader.plan_entries(archive, settings)
+                for entry in planned:
+                    if entry.name not in wanted:
+                        continue
+                    try:
+                        bundle.writestr(entry.name, zip_reader.read_entry(archive, entry))
+                    except (KeyError, errors.PipelineError):
+                        continue
+                    wanted.discard(entry.name)
+        finally:
+            del data
 
 
 def run_job(job_id: str) -> None:

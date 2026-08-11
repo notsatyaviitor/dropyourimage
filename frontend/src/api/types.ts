@@ -163,6 +163,8 @@ export interface BackgroundSpec {
 export interface SizeSpec {
   width: number
   height: number
+  /** Deliver at the source's own pixel dimensions, ignoring width/height. */
+  match_source: boolean
   fit: FitMode
   margin_pct: number
   allow_upscale: boolean
@@ -213,7 +215,14 @@ export const DEFAULT_JOB_CONFIG: JobConfig = {
     subject_padding_pct: 6,
   },
   background: { transparent: false, color: '#FFFFFF', shadow: 'preserve', decontaminate_edges: true },
-  size: { width: 500, height: 500, fit: 'contain', margin_pct: 5, allow_upscale: false },
+  size: {
+    width: 500,
+    height: 500,
+    match_source: false,
+    fit: 'contain',
+    margin_pct: 5,
+    allow_upscale: false,
+  },
   centring: { mode: 'bbox', include_shadow_in_bounds: false, alpha_threshold: 0.05 },
   psd: {
     enabled: false,

@@ -438,6 +438,17 @@ class SizeSpec(StrictModel):
 
     width: Annotated[int, Field(ge=1, le=20000)] = 500
     height: Annotated[int, Field(ge=1, le=20000)] = 500
+    match_source: bool = Field(
+        default=False,
+        description=(
+            "Deliver at the source photograph's own pixel dimensions, ignoring width/height. "
+            "The canvas is exact either way; this only chooses where the numbers come from. "
+            "Set this when 'the output looks softer than what I uploaded' — a 50 MP raw asked "
+            "for at the 500x500 default keeps 0.5% of its pixels, and no resampler can undo "
+            "that. Still bounded by MAX_OUTPUT_PIXELS, so an enormous source is refused rather "
+            "than silently shrunk."
+        ),
+    )
     fit: FitMode = FitMode.CONTAIN
     margin_pct: Annotated[float, Field(ge=0, le=45)] = Field(
         default=5.0,

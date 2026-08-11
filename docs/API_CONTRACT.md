@@ -246,6 +246,20 @@ case, which pays for no extra encode.
 
 Viewable formats: `png` · `jpeg` · `webp` · `bmp`.
 
+### `size.match_source` — deliver at the source's own resolution
+
+`false` by default, so existing jobs are unchanged. When `true`, `width`/`height` are ignored and
+each image is delivered at its own pixel dimensions; the canvas is still exact, only the numbers
+come from the photograph instead of the config.
+
+This is the answer to "the output is less sharp than what I uploaded". That is a canvas choice
+rather than a resampling fault — resizing already steps down with `INTER_AREA` before a final
+Lanczos pass — and a 50.6 MP raw asked for at the 500×500 default keeps **0.49%** of its pixels,
+which no filter can recover. Leave it off when an order needs one fixed size for a marketplace.
+
+Still bounded by `MAX_OUTPUT_PIXELS`, so an enormous source is refused with `output_too_large`
+rather than silently shrunk, and each axis is clamped to the 20000 contract bound.
+
 ### Formats
 
 **`SourceFormat` — what can be read (14).**
@@ -257,6 +271,15 @@ Viewable formats: `png` · `jpeg` · `webp` · `bmp`.
 
 **`export.match_source`** (default `true`) additionally delivers each image in the format it
 arrived as, unioned with `export.formats`. A PNG in gives a PNG out; a TIFF a TIFF.
+
+**Camera raw is the exception, and the download bundle compensates.** CRW/CR2/CR3/DNG/NEF/RAW have
+no encoder in any library — Nikon and Canon publish no writer spec, and a Linear DNG written here
+was verified to round-trip *wrong* through libraw — so `match_source` can only substitute 16-bit
+TIFF for them (`format_substituted`). When `match_source` is on, the bundle therefore also carries
+the **untouched original upload** (`shot.nef` beside `shot.tiff`), byte-identical to what was sent.
+It is the source, not a processed asset: it cannot carry the cut-out, because no format in that
+family can express one. Copied straight from the stored upload archive, so nothing is duplicated in
+object storage.
 
 The delivered set is the **union** of the two fields, which gives three modes:
 

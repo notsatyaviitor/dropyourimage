@@ -166,7 +166,8 @@ export function SpecificationStep({
               <div className="spec-card-name">POC Configuration</div>
               <div className="spec-card-desc">
                 clipping · background {background.transparent ? 'transparent' : background.color} ·{' '}
-                {size.width}×{size.height} · {centring.mode === 'bbox' ? 'bounding box' : 'centroid'}
+                {size.match_source ? 'original size' : `${size.width}×${size.height}`} ·{' '}
+                {centring.mode === 'bbox' ? 'bounding box' : 'centroid'}
               </div>
             </div>
             <div className="spec-checkbox">
@@ -410,12 +411,35 @@ export function SpecificationStep({
               detail="Resize the output canvas to exact pixel dimensions for marketplace compliance."
               alwaysOn
             >
-              <div className="preset-row">
+              {/*
+                Offered first, and above the presets, because it is the answer to "the download
+                looks softer than what I uploaded". That is a canvas choice, not a resampling
+                fault: a 50 MP raw delivered at the 500x500 default keeps 0.5% of its pixels.
+              */}
+              <label className="opt-check">
+                <input
+                  type="checkbox"
+                  checked={size.match_source}
+                  onChange={(e) => setSize({ match_source: e.target.checked })}
+                />
+                Keep the original resolution of each image
+              </label>
+              {explain && (
+                <p className="opt-help">
+                  Delivers at the uploaded photograph’s own pixel dimensions instead of a fixed
+                  canvas — every image keeps the detail it arrived with. Tick this when the output
+                  looks less sharp than the source. Leave it off when the order needs one exact
+                  size for a marketplace.
+                </p>
+              )}
+
+              <div className={`preset-row${size.match_source ? ' opt-disabled' : ''}`}>
                 {SIZE_PRESETS.map((p) => (
                   <button
                     key={p.label}
                     type="button"
-                    className={`preset-btn${size.width === p.w && size.height === p.h ? ' active' : ''}`}
+                    disabled={size.match_source}
+                    className={`preset-btn${!size.match_source && size.width === p.w && size.height === p.h ? ' active' : ''}`}
                     onClick={() => setSize({ width: p.w, height: p.h })}
                   >
                     {p.label}
@@ -424,12 +448,13 @@ export function SpecificationStep({
               </div>
 
               <p className="opt-sublabel">Width × Height</p>
-              <div className="size-input-row">
+              <div className={`size-input-row${size.match_source ? ' opt-disabled' : ''}`}>
                 <input
                   type="number"
                   className="opt-input size-num"
                   min={1}
                   max={20000}
+                  disabled={size.match_source}
                   value={size.width}
                   onChange={(e) => setSize({ width: clampDim(e.target.value) })}
                 />
@@ -439,12 +464,13 @@ export function SpecificationStep({
                   className="opt-input size-num"
                   min={1}
                   max={20000}
+                  disabled={size.match_source}
                   value={size.height}
                   onChange={(e) => setSize({ height: clampDim(e.target.value) })}
                 />
                 <span className="size-unit">px</span>
               </div>
-              {explain && (
+              {explain && !size.match_source && (
                 <p className="opt-help">Asserted before delivery — 500 × 500 means exactly 500 × 500.</p>
               )}
 

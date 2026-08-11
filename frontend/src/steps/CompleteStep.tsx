@@ -61,7 +61,25 @@ const ERROR_COPY: Record<string, string> = {
   internal_error: 'An internal error occurred',
 }
 
-/** Notes meaning "this asset may be of the wrong thing". Banner, not chip — chips get scrolled past. */
+/**
+ * Notes meaning "this asset may be of the wrong thing". Banner, not chip — chips get scrolled past.
+ *
+ * **This list is deliberately short, and everything absent from it is a diagnostic rather than a
+ * defect.** These pages are shown to clients, and a result covered in alarm chips reads as broken
+ * work even when every chip is describing correct behaviour: `format_substituted` is the *right*
+ * outcome for a camera raw, `single_engine_only` is a statement about how many API keys exist,
+ * `vendor_downscaled` affects mask precision and provably no output pixel, and
+ * `shadow_gate_failed` is inevitable on any backdrop that is not a studio sweep. None of them
+ * means "this file is wrong". They stay visible under Processing details, for the operator.
+ *
+ * The bar for this list is: could the delivered image be *of the wrong subject*, or contain pixels
+ * that were invented or thrown away? Only those earn a banner.
+ *
+ * `alpha_suspect` was removed on the operator's instruction — a low geometric score is a weak
+ * signal on its own, and it fired on packshots that were fine. The wrong-object cases it used to
+ * catch are still caught by `busy_scene`, `subject_not_found` and `scene_largest_object`, which
+ * are more specific and stay here.
+ */
 const CRITICAL_NOTES: Partial<Record<Note, string>> = {
   subject_not_found:
     'The subject you named was not found, so the whole frame was cut out — very likely the wrong object.',
@@ -69,7 +87,6 @@ const CRITICAL_NOTES: Partial<Record<Note, string>> = {
     'This looks like a scene rather than a packshot. The cut-out may be of the wrong object — name it in the Subject field.',
   scene_largest_object:
     'Several objects were found here and only the largest was kept — this may not be the one you wanted. Name it in the Subject field to pick it properly.',
-  alpha_suspect: 'The cut-out scored low on automatic checks. Look closely before using it.',
   hard_edged_mask:
     'Cut out by Gemini, which returns a polygon — this edge is hard, with no soft alpha. Expect a halo against saturated background colours. Re-run with Photoroom for a soft edge.',
 }
@@ -554,14 +571,23 @@ function ResultCard({
         </div>
       ))}
 
+      {/*
+        Collapsed, not deleted. These are provenance — which engine ran, whether the payload was
+        downscaled, why the format changed — and the demo has to be able to explain any output it
+        shows. Hiding them by default keeps a correct result looking correct; keeping them one
+        click away means nothing about how the file was produced is unavailable.
+      */}
       {other.length > 0 && (
-        <div className="res-notes">
-          {other.map((n) => (
-            <span className="res-note-chip" key={n} title={NOTE_LABELS[n]}>
-              {n.replace(/_/g, ' ')}
-            </span>
-          ))}
-        </div>
+        <details className="res-details">
+          <summary className="res-details-summary">Processing details ({other.length})</summary>
+          <div className="res-notes">
+            {other.map((n) => (
+              <span className="res-note-chip" key={n} title={NOTE_LABELS[n]}>
+                {n.replace(/_/g, ' ')}
+              </span>
+            ))}
+          </div>
+        </details>
       )}
 
       {result.outputs.length > 0 && (
