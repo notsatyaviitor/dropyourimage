@@ -20,8 +20,19 @@ class StorageBackend(Protocol):
         """Retrieve bytes. Raises `KeyError` if absent."""
         ...
 
-    def put_stream(self, key: str, fileobj: BinaryIO, content_type: str) -> None:
+    def put_stream(
+        self,
+        key: str,
+        fileobj: BinaryIO,
+        content_type: str,
+        content_disposition: str | None = None,
+    ) -> None:
         """Store from an open file object, without loading it into memory.
+
+        `content_disposition` names the file the browser saves. It has to be stored on the object
+        rather than set by the client: the download link points straight at cloud storage, and
+        HTML's `download` attribute is **ignored for cross-origin URLs**, so the browser falls back
+        to the storage key — which is why every order arrived as `outputs.zip`.
 
         Exists for the download bundle. `_write_bundle` assembles the zip through a temp file
         precisely so a multi-gigabyte bundle is never a `bytes` object — and then handed it to

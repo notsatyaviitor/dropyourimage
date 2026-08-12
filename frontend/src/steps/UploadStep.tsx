@@ -7,9 +7,15 @@
  *   user's files, and paired each with an unrelated stock photo as its "after". Nothing was
  *   processed, so a stakeholder was shown a result the pipeline never produced.
  * - "Start Upload" performs the actual `POST /jobs` instead of a 1.6s `setTimeout` status flip.
- * - The Details panel drops the invented `€ 9.65` / VAT / total figures. There is no pricing model
- *   in this POC, and a number on a screen becomes a quote. The cost line that IS shown comes from
- *   `POST /jobs/estimate` and is labelled an estimate — see `CostEstimate`.
+ * - **The Details panel shows no monetary figures at all.** It began by dropping the prototype's
+ *   invented `€ 9.65` / VAT / total, keeping a labelled per-image API cost in their place. That
+ *   went too on client feedback: our vendor cost read as a price to the customer, and a number on
+ *   screen becomes a quote whether or not the caption says otherwise — including the paragraph
+ *   that existed to explain it wasn't one.
+ *
+ *   `POST /jobs/estimate` is still called, because two of the things it returns are not pricing:
+ *   whether a batch is large enough to need explicit confirmation, and whether it will hit the
+ *   server's per-job ceiling and stop partway. See `BatchPanel`.
  *
  * ## Surviving a 400-file selection
  *
@@ -21,7 +27,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { UPLOAD_BATCH_BYTES, UPLOAD_BATCH_SIZE, estimateJob, planUploadBatches } from '@/api/client'
 import type { UploadProgress } from '@/api/client'
-import type { CostEstimate, JobConfig, ServerLimits } from '@/api/types'
+import type { CostEstimate, JobConfig, SampleFile, SampleList, ServerLimits } from '@/api/types'
 import { ACCEPTED_EXTENSIONS, isBrowserRenderableFile } from '@/api/types'
 import { useObjectUrl } from '@/lib/objectUrl'
 import { formatBytes } from '@/lib/utils'
@@ -38,7 +44,9 @@ export function UploadStep({
   files,
   config,
   limits,
+  samples,
   submitting,
+  onDismissSample,
   upload,
   submitError,
   onFilesChange,
@@ -48,7 +56,9 @@ export function UploadStep({
   files: PickedFile[]
   config: JobConfig
   limits: ServerLimits
+  samples: SampleList
   submitting: boolean
+  onDismissSample: (name: string) => void
   upload: UploadProgress | null
   submitError: string | null
   onFilesChange: (next: PickedFile[]) => void
@@ -157,6 +167,22 @@ export function UploadStep({
       : 'waiting'
   }
 
+  /**
+   * Nothing picked and the server offers samples: the order runs on those instead.
+   *
+   * Derived from the file list rather than a toggle, so there is exactly one rule and no third
+   * state — adding a real file makes it an ordinary upload again, and removing them all brings
+   * the samples back. Mirrors `usingSamples` in App.tsx, which decides the actual request.
+   *
+   * The rows below are **not** placeholders. The server holds these files and processes them
+   * through the same pipeline as an upload; the browser simply never carries the bytes, which for
+   * four ~130 MB PSDs is the difference between a working demo and a hung tab.
+   */
+  const usingSamples = files.length === 0 && samples.files.length > 0
+
+  /** How many files this order will actually process — picked files, or the samples standing in. */
+  const queued = usingSamples ? samples.files.length : files.length
+
   const overJobCap = limits.max_job_images > 0 && files.length > limits.max_job_images
   const overJobBytes = limits.max_job_upload_bytes > 0 && totalBytes > limits.max_job_upload_bytes
   const needsWorker = !limits.bulk_enabled && files.length > limits.inline_max_images
@@ -181,14 +207,19 @@ export function UploadStep({
           type="button"
           className="btn-next"
           onClick={onStart}
-          disabled={files.length === 0 || submitting || blocked}
-          title={files.length === 0 ? 'Add at least one image first' : undefined}
+          disabled={(files.length === 0 && !usingSamples) || submitting || blocked}
+          title={
+            files.length === 0 && !usingSamples ? 'Add at least one file first' : undefined
+          }
         >
           {submitting
             ? upload
               ? `Uploading ${upload.imagesSent}/${upload.imagesTotal}…`
               : 'Starting…'
-            : `Process ${files.length || ''} image${files.length === 1 ? '' : 's'}`}
+            : /* Counts the samples when they are what will run. Reading `files.length` alone gave
+                 "Process  images" — no number, and a double space — for a sample order, because
+                 nothing is picked in that case. */
+              `Process ${queued} file${queued === 1 ? '' : 's'}`}
         </button>
       </div>
 
@@ -275,7 +306,9 @@ export function UploadStep({
           <div className="upload-files-box">
             <div className="upload-files-head">
               <span className="upload-files-title">
-                Your files{files.length > 0 && ` · ${files.length}`}
+                {usingSamples ? 'Sample files' : 'Your files'}
+                {(usingSamples ? samples.files.length : files.length) > 0 &&
+                  ` · ${usingSamples ? samples.files.length : files.length}`}
               </span>
               <input
                 type="text"
@@ -286,7 +319,24 @@ export function UploadStep({
               />
             </div>
 
-            {files.length === 0 ? (
+            {usingSamples ? (
+              <>
+                <p className="upload-sample-note">
+                  Ready to process without uploading — these live on the server. Remove any you do
+                  not want, or add your own files to replace them entirely.
+                </p>
+                <div className="file-list">
+                  {samples.files.map((s) => (
+                    <SampleRow
+                      key={s.name}
+                      sample={s}
+                      disabled={submitting}
+                      onRemove={() => onDismissSample(s.name)}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : files.length === 0 ? (
               <div className="upload-empty">No files added yet</div>
             ) : visible.length === 0 ? (
               <div className="upload-empty">No file matches &ldquo;{query}&rdquo;</div>
@@ -336,8 +386,22 @@ export function UploadStep({
         <div className="details-panel">
           <div className="details-title">Details</div>
           <Detail k="Specification" v="POC Configuration" />
-          <Detail k="Images" v={files.length > 0 ? String(files.length) : '—'} />
-          <Detail k="Total upload" v={files.length > 0 ? formatBytes(totalBytes) : '—'} />
+          <Detail
+            k="Images"
+            v={usingSamples ? String(samples.files.length) : files.length > 0 ? String(files.length) : '—'}
+          />
+          {/* "Total upload" would read 520 MB for samples the browser never sends. Naming the
+              source instead is both true and the more useful fact on this panel. */}
+          <Detail
+            k={usingSamples ? 'Source' : 'Total upload'}
+            v={
+              usingSamples
+                ? `server samples · ${formatBytes(samples.total_bytes)}`
+                : files.length > 0
+                  ? formatBytes(totalBytes)
+                  : '—'
+            }
+          />
           {batches.length > 1 && (
             // Shown because with large sources it is not derivable from the file count: a 130 MB
             // PSD makes a batch on its own, so "132 files" can mean 66 uploads.
@@ -347,7 +411,7 @@ export function UploadStep({
             />
           )}
           <div className="detail-divider" />
-          <Detail k="Clipping" v={config.cutout.strategy === 'auto' ? 'Auto (dual engine)' : (config.cutout.engine ?? '—')} />
+          <Detail k="Background removal" v={config.cutout.strategy === 'auto' ? 'Auto (dual engine)' : (config.cutout.engine ?? '—')} />
           <Detail k="Subject" v={config.cutout.subject_prompt ?? 'whole frame'} />
           <Detail
             k="Background"
@@ -368,19 +432,24 @@ export function UploadStep({
           <div className="detail-divider" />
           <Detail k="Upload method" v="Manual" />
 
+          {/*
+            No monetary figures on this page. Client feedback: our per-image API cost read as a
+            price, and a number on the screen the customer sees becomes a quote whether or not it
+            is labelled one — including the paragraph that used to explain it wasn't.
+
+            The estimate is still fetched, because it carries two things that are not pricing: the
+            batch-size confirmation, and whether the job will hit the server's per-job ceiling and
+            stop partway. Both are operational warnings and both stay.
+          */}
           {estimate && estimate.estimated_cost_usd > 0 && (
-            <CostPanel
+            <BatchPanel
               estimate={estimate}
               needsConfirm={needsConfirm}
               confirmed={confirmed}
               onConfirm={setConfirmed}
+              images={files.length}
             />
           )}
-
-          <p className="details-note">
-            No pricing is shown: this POC has no billing model, and a figure on screen becomes a
-            quote. The vendor-spend figure above is our own API cost, not a price to the customer.
-          </p>
         </div>
       </div>
     </div>
@@ -401,6 +470,50 @@ const ROW_LABEL: Record<RowStatus, string> = {
   waiting: 'Queued',
   uploading: 'Uploading',
   uploaded: 'Uploaded',
+}
+
+/**
+ * A server-side sample, rendered to match `FileRow` exactly.
+ *
+ * Deliberately the same markup — `.file-item`, thumb, info, status, remove — because the two
+ * lists sit in the same box and any difference reads as a rendering bug. An earlier version
+ * hand-rolled its own div classes and stacked vertically while real files laid out in a row.
+ *
+ * No object URL and no thumbnail: the browser does not have these bytes, which is the whole
+ * point. The format badge is what a PSD or EPS would show anyway.
+ */
+function SampleRow({
+  sample,
+  disabled,
+  onRemove,
+}: {
+  sample: SampleFile
+  disabled: boolean
+  onRemove: () => void
+}) {
+  const ext = sample.name.split('.').pop()?.toUpperCase() ?? '?'
+
+  return (
+    <div className="file-item">
+      <div className="file-thumb file-thumb-empty" title={`${ext} — held on the server`}>
+        <span className="file-thumb-ext">{ext}</span>
+      </div>
+      <div className="file-info">
+        <div className="file-name">{sample.name}</div>
+        <div className="file-size">{formatBytes(sample.size_bytes)}</div>
+      </div>
+      <div className="file-status file-status-ready">Ready</div>
+      <button
+        type="button"
+        className="file-remove"
+        onClick={onRemove}
+        title="Remove this sample"
+        disabled={disabled}
+      >
+        ×
+      </button>
+    </div>
+  )
 }
 
 function FileRow({
@@ -452,47 +565,42 @@ function FileRow({
 }
 
 /**
- * Vendor-spend estimate, with an explicit confirmation for a batch large enough to matter.
+ * Batch-size guard rail. **Carries no monetary figures** — see the note at its call site.
  *
- * Deliberately worded as *our* API cost rather than anything the customer would pay, and every
- * figure carries the word estimate. `frontend/CLAUDE.md` forbids presenting an invented number as
- * measured; these are not invented, but they are list prices rather than invoices, and that
- * distinction has to survive contact with a stakeholder reading the screen.
+ * What survives from the cost panel it replaces is the part that is not pricing: a large batch
+ * asks for an explicit acknowledgement before it starts, and a batch big enough to hit the
+ * server's per-job ceiling says so, because that job will stop partway and return only what
+ * finished. Both were bundled with the price display and would have been lost with it.
  */
-function CostPanel({
+function BatchPanel({
   estimate,
   needsConfirm,
   confirmed,
   onConfirm,
+  images,
 }: {
   estimate: CostEstimate
   needsConfirm: boolean
   confirmed: boolean
   onConfirm: (v: boolean) => void
+  images: number
 }) {
+  if (!needsConfirm && !estimate.exceeds_ceiling && !estimate.per_object_pricing) return null
+
   return (
     <div className={`cost-panel${estimate.exceeds_ceiling ? ' over' : ''}`}>
-      <Detail
-        k="Est. vendor spend"
-        v={`~$${estimate.estimated_cost_usd.toFixed(2)}`}
-      />
-      <Detail
-        k="Per image"
-        v={`$${estimate.cost_per_image_usd.toFixed(3)} · ${estimate.engines.join(' + ')}`}
-      />
-
       {estimate.per_object_pricing && (
         <p className="cost-note">
-          Multi-object layering bills <strong>one segmentation call per object</strong>, and the
-          object count is not known until each scene is analysed. Treat this as a floor, not a
-          total — a nine-object room is nine calls.
+          Multi-object layering runs <strong>one segmentation pass per object</strong>, and the
+          object count is not known until each scene is analysed — so a nine-object room is nine
+          passes and takes proportionally longer.
         </p>
       )}
 
       {estimate.exceeds_ceiling && (
         <p className="cost-note over">
-          This is over the server&rsquo;s ${estimate.ceiling_usd.toFixed(2)} per-job ceiling. The
-          job will stop when it reaches that figure and return whatever finished first.
+          This order is large enough to reach the server&rsquo;s per-job limit. If it does, the job
+          stops there and returns whatever finished first.
         </p>
       )}
 
@@ -504,8 +612,7 @@ function CostPanel({
             onChange={(e) => onConfirm(e.target.checked)}
           />
           <span>
-            I understand this batch will spend about ${estimate.estimated_cost_usd.toFixed(2)} on
-            segmentation APIs.
+            I understand this will process {images} images and cannot be undone once it starts.
           </span>
         </label>
       )}

@@ -198,14 +198,6 @@
 }
 
 /* Logout — matches production: font-opensans-bold, d-inline-flex, icon-login */
-.btn-logout {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: none; border: none;
-  font-family: "Open Sans", sans-serif; font-size: 13px; font-weight: 700;
-  color: #152339; cursor: pointer; padding: 6px 0;
-  text-decoration: none; transition: opacity .15s;
-}
-.btn-logout:hover { opacity: .7; }
 
 /* ── Wizard content ─────────────────────────────── */
 .wizard-content { flex: 1; padding: 40px 52px 64px; }
@@ -280,38 +272,64 @@
 .spec-checkbox svg { width: 14px; height: 14px; }
 
 /* 3-column feature card grid */
-.service-rows {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  /* Cards size to their own content instead of stretching to the tallest in the row. With the
-     long help text gone, the columns differ a lot in height, and stretching left large empty
-     panels under Clipping and Background that read as "something failed to load". */
-  align-items: start;
-}
+/*
+ * Stacked full-width sections, not a grid of cards.
+ *
+ * The card grid could not be made to work, and the reason is content rather than CSS: Clipping
+ * holds a single text input while Output Size holds presets, two number fields, six format chips
+ * and a note. In any multi-column arrangement one card ends up a fraction of its neighbour's
+ * height and the difference reads as a broken or half-loaded panel. Every fix — 3 columns, 2
+ * columns, start-aligned, stretched — only moved the void around.
+ *
+ * One column removes the problem rather than balancing it. Each section is as tall as its own
+ * content, and a horizontal rule separates them, so there is no box whose size invites comparison
+ * with the box beside it.
+ */
+.service-rows { display: flex; flex-direction: column; }
 
 .service-row {
-  display: flex; flex-direction: column;
-  padding: 20px 22px 22px;
-  background: var(--menu-hover); border-radius: 10px;
-  border: 1px solid var(--border);
-  position: relative;
-  transition: border-color .15s, box-shadow .15s;
+  display: grid;
+  /* Description column is fixed so every section's controls start on the same vertical line —
+     that shared edge is what makes a stacked form scannable. */
+  grid-template-columns: 264px minmax(0, 1fr);
+  gap: 20px 48px;
+  padding: 26px 0;
+  border-top: 1px solid var(--border);
 }
-.service-row:hover { border-color: #d0d5de; box-shadow: 0 2px 8px rgba(21,35,57,.06); }
-.service-row-left { flex: 1; min-width: 0; }
+.service-row:first-child { border-top: 0; padding-top: 6px; }
+
+/* Below this the description column has nowhere to go, so it becomes a heading above its own
+   controls rather than a 264px sliver squeezing them. */
+@media (max-width: 980px) {
+  .service-row { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .service-row-detail { max-width: none; }
+}
+
+/* A disabled section stays readable but visibly out of play, rather than vanishing. */
+.service-row.is-off .srow-aside { opacity: .55; }
+
+.srow-aside { display: flex; flex-direction: column; gap: 8px; }
 .service-row-name {
   font-family: "Open Sans", sans-serif;
-  font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.4;
+  font-size: 15px; font-weight: 700; color: var(--text); line-height: 1.35;
 }
-.service-row-detail { font-size: 12.5px; color: var(--muted); margin-top: 5px; line-height: 1.55; }
+.service-row-detail {
+  font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.6; max-width: 40ch;
+}
 
-/* Toggle anchored to top-right of card */
-.toggle-wrap { position: absolute; top: 20px; right: 22px; }
-.toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+.toggle-switch {
+  position: relative; display: inline-flex; align-items: center; gap: 9px;
+  width: max-content; height: 24px; margin-top: 4px; cursor: pointer;
+}
+/* The switch reads as a control, so it says which state it is in rather than leaving the user to
+   infer it from colour alone — the only cue when a section is off and its controls are hidden. */
+.toggle-label {
+  font-family: Manrope, sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+}
 .toggle-switch input { opacity: 0; width: 0; height: 0; }
 .toggle-track {
-  position: absolute; cursor: pointer; inset: 0;
+  position: relative; flex: 0 0 44px; height: 24px; cursor: pointer;
   background: #d0d4db; border-radius: 24px; transition: background .25s;
 }
 .toggle-track::before {
@@ -324,11 +342,55 @@
 .toggle-switch input:checked + .toggle-track::before { transform: translateX(20px); }
 .toggle-switch input:disabled + .toggle-track { opacity: .6; cursor: not-allowed; }
 
-.service-options { display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
-.service-options.open { display: block; }
+/*
+ * One rhythm for every control in a card, replacing the margin each element used to set for
+ * itself. Those margins ranged from 5px to 16px and, crucially, `.opt-sublabel` had a
+ * `margin-bottom` but no `margin-top` — so a label directly under a control had *zero* gap above
+ * it. "REPLACEMENT COLOUR" sat welded to the radio row above, "ALSO DELIVER" to the checkbox, and
+ * with Explain on the prose landed between a control and the next label with equal space either
+ * side, so nothing read as belonging to anything.
+ *
+ * The flex gap gives label-to-control spacing; the label's own `margin-top` adds to it, so a new
+ * group opens with visibly more air than the gap inside a group. That difference is what makes the
+ * card scannable. Same fix, same reason, as `.result-card-body`.
+ */
+.service-options { display: none; }
+.service-options.open,
+.opt-advanced-body {
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+/*
+ * Applied to BOTH stacks. `.opt-advanced-body` is a separate container, so fixing only
+ * `.service-options` left every control inside an opened Advanced block back on its own margins —
+ * which is precisely the state that looked worst.
+ *
+ * A label opens a group, so it takes air above (18 + the 10px gap = 28) and none below beyond the
+ * gap. A checkbox is a label and a control in one, so it opens a group too, but needs less.
+ */
+.service-options > .opt-sublabel,
+.opt-advanced-body > .opt-sublabel { margin: 18px 0 0; }
+
+.service-options > .opt-check,
+.opt-advanced-body > .opt-check { margin: 8px 0 0; }
+
+.service-options > .opt-sublabel:first-child,
+.opt-advanced-body > .opt-sublabel:first-child,
+.service-options > .opt-check:first-child,
+.opt-advanced-body > .opt-check:first-child { margin-top: 0; }
+
+/* Everything else lets the container own the spacing; their own margins would double it. */
+.service-options > .opt-help,
+.service-options > .opt-error,
+.service-options > .opt-note,
+.service-options > .opt-range,
+.opt-advanced-body > .opt-help,
+.opt-advanced-body > .opt-error,
+.opt-advanced-body > .opt-note,
+.opt-advanced-body > .opt-range { margin-top: 0; }
 
 /* ── Feature card header with icon ─── */
-.srow-header { display: flex; align-items: flex-start; gap: 12px; padding-right: 52px; }
+.srow-header { display: flex; align-items: center; gap: 10px; }
 .srow-icon {
   width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center; margin-top: 1px;
@@ -342,7 +404,7 @@
 .opt-sublabel {
   font-family: Manrope, sans-serif; font-size: 10.5px; font-weight: 700;
   letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
-  margin-bottom: 10px;
+  margin: 0;
 }
 
 /* ── Colour picker row ─── */
@@ -375,19 +437,26 @@
 }
 .hex-input {
   font-family: 'Courier New', Courier, monospace;
-  font-size: 14px; letter-spacing: .05em; color: var(--muted);
-  flex: 1;
+  font-size: 14px; letter-spacing: .05em; color: var(--text);
+  /* Capped rather than `flex: 1`. Stretched across a wide card, a 7-character value floated in a
+     600px box that looked like an empty field. */
+  flex: 0 1 150px; text-transform: uppercase;
 }
 .opt-color-picker { opacity: 0; position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
 
 /* ── Centre preview diagram ─── */
 .centre-preview {
-  margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  /* No top border or margin: the card body now owns spacing between groups, and a second rule
+     here stacked directly under the header's. */
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px; background: var(--card-bg);
+  border: 1px solid var(--border); border-radius: 8px;
 }
 .centre-preview-frame {
-  width: 100%; height: 80px; max-width: 220px;
-  border: 1.5px dashed var(--border); border-radius: 6px;
+  /* A square canvas, because that is what it depicts. At 220x80 it read as a wide empty panel
+     rather than a preview of a 500x500 output. */
+  width: 116px; height: 116px;
+  border: 1.5px dashed var(--light); border-radius: 6px;
   background: var(--content-bg); position: relative;
   display: flex; align-items: center; justify-content: center;
 }
@@ -397,8 +466,8 @@
 .centre-guide-h { width: 100%; height: 1px; top: 50%; left: 0; }
 .centre-guide-v { width: 1px; height: 100%; left: 50%; top: 0; }
 .centre-preview-subject {
-  width: 34px; height: 50px; border-radius: 4px;
-  background: var(--navy); opacity: .18; position: relative; z-index: 1;
+  width: 40px; height: 58px; border-radius: 4px;
+  background: var(--navy); opacity: .28; position: relative; z-index: 1;
 }
 .centre-preview-label {
   font-family: Manrope, sans-serif; font-size: 10.5px; font-weight: 600;
@@ -524,6 +593,9 @@
 .search-input:focus { border-color: var(--green); }
 .search-input::placeholder { color: var(--light); }
 
+.upload-sample-note {
+  margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.5;
+}
 .upload-empty { text-align: center; padding: 42px 20px; color: var(--light); font-size: 14px; }
 .file-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -791,7 +863,11 @@
 
 /* ── Stat cards (Step 4 top row) ────────────────── */
 .proc-summary {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  /* Equal columns for however many tiles there are, rather than a hardcoded four. With
+     `repeat(4, 1fr)` and three tiles, the empty fourth track stayed part of the card and the last
+     tile — which has no right border — read as one double-width box. Auto-flow sizes to the real
+     child count, so removing or adding a tile keeps them all equal. */
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0;
   border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
   margin-bottom: 32px; background: var(--card-bg);
   box-shadow: 0 4px 20px rgba(21,35,57,.07);
@@ -880,7 +956,11 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 14px;
-  padding: 4px 0;
+  /* Padded to match `.batch-section-hdr`'s 28px, so cards line up with the heading above them
+     instead of sitting flush against the section edge. The bottom value matters most: at the
+     previous `4px`, a card's own rounded border landed a few pixels above the section's border
+     and the two read as one doubled line at the foot of the panel. */
+  padding: 20px 28px 24px;
 }
 .result-card {
   background: var(--card-bg); position: relative;
@@ -966,7 +1046,6 @@
 .step-clickable { cursor: pointer; }
 .step-clickable:hover { background: var(--navy-lt); }
 .step-circle.off.step-clickable:hover { background: #eef1f5; border-color: #a9b4c2; }
-.btn-logout:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ── Extra option controls ──────────────────────────────────
    The prototype's spec card exposed three services with one control each. The pipeline has more
@@ -978,7 +1057,12 @@
   background-repeat: no-repeat; background-position: right 10px center;
   padding-right: 28px; cursor: pointer; width: 100%; max-width: 340px;
 }
-.opt-help { font-size: 11.5px; line-height: 1.55; color: var(--muted); margin-top: 5px; max-width: 460px; }
+/* Annotation, not chrome: a hairline rule on the inline-start edge ties the prose to the control
+   it explains, so with Explain on it can no longer be mistaken for the next group's label. */
+.opt-help {
+  font-size: 11.5px; line-height: 1.55; color: var(--muted); margin-top: 5px; max-width: 520px;
+  padding-inline-start: 10px; border-inline-start: 2px solid var(--border);
+}
 .opt-error { font-size: 11.5px; color: #c0392b; margin-top: 5px; font-weight: 600; }
 /* An accepted trade-off stated where the choice is made — heavier than .opt-help, lighter than
    .opt-error, since nothing is wrong. Shares the amber of .res-banner, which carries the matching
@@ -988,16 +1072,48 @@
   font-size: 11.5px; line-height: 1.5; max-width: 460px;
 }
 .dz-formats {
-  margin-top: 6px; font-size: 10.5px; line-height: 1.5; color: var(--light);
-  max-width: 420px; text-align: center;
+  /* `margin-inline: auto` is load-bearing, not cosmetic. The dropzone centres its children with
+     `text-align: center`, which centres inline content — but this is a block box with a
+     `max-width`, so without auto side margins the BOX sits flush against the left edge while its
+     text is centred inside it. The result reads as a stray left-floating caption. `.dz-cloud-icon`
+     above needed the same fix for the same reason. */
+  margin: 6px auto 0; font-size: 10.5px; line-height: 1.5; color: var(--light);
+  max-width: 520px; text-align: center;
 }
 .opt-note-warn { background: #fff8e6; border: 1px solid #f5d98a; color: #7a5c11; }
 .opt-optional {
   margin-left: 6px; font-size: 9.5px; font-weight: 700; letter-spacing: .05em;
   text-transform: uppercase; color: var(--light);
 }
-.opt-range { width: 100%; max-width: 340px; accent-color: var(--green); margin-top: 2px; }
-.opt-range:disabled { opacity: .45; }
+/*
+ * Explicit track and thumb. `accent-color` alone colours the *filled* portion but leaves the rest
+ * of the track at the UA default — which on this Chrome renders near-black, so the two sliders read
+ * as heavy black bars against an otherwise light card. Styling both halves is the only way to get
+ * a track that belongs to this palette.
+ */
+.opt-range {
+  width: 100%; max-width: 340px; margin: 2px 0;
+  -webkit-appearance: none; appearance: none;
+  height: 18px; background: transparent; cursor: pointer;
+}
+.opt-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px; background: var(--border);
+}
+.opt-range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--border); }
+.opt-range::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--green); }
+.opt-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%; margin-top: -6px;
+  background: var(--green); border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(21,35,57,.25);
+}
+.opt-range::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff;
+  background: var(--green); box-shadow: 0 1px 4px rgba(21,35,57,.25);
+}
+.opt-range:focus-visible { outline: none; }
+.opt-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgba(44,188,99,.25); }
+.opt-range:disabled { opacity: .45; cursor: not-allowed; }
 .opt-check {
   display: flex; align-items: flex-start; gap: 8px; margin-top: 12px;
   font-size: 12.5px; color: var(--text); cursor: pointer; line-height: 1.45;
@@ -1012,7 +1128,7 @@
 }
 .opt-radio input { accent-color: var(--green); }
 
-.preset-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .preset-btn {
   padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border);
   background: #fff; font-size: 11.5px; font-weight: 600; color: var(--muted); cursor: pointer;
@@ -1098,7 +1214,6 @@
   font-size: 11px; line-height: 1.5; color: var(--muted); text-align: left; }
 .res-meta-row { overflow-wrap: anywhere; }
 .res-meta strong { color: var(--text); font-weight: 600; }
-.res-meta-warn { color: #a06a12; font-weight: 600; }
 .res-meta details > summary { cursor: pointer; margin-top: 2px; }
 .res-fmt-links { display: flex; gap: 5px; flex-wrap: wrap; }
 .res-fmt-link {
@@ -1248,7 +1363,7 @@
 }
 .explain-switch input { accent-color: var(--green); cursor: pointer; }
 
-.opt-advanced { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.opt-advanced { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
 .opt-advanced > summary {
   cursor: pointer; list-style: none;
   font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
@@ -1260,7 +1375,7 @@
 }
 .opt-advanced[open] > summary::before { transform: rotate(90deg); }
 .opt-advanced > summary:hover { color: var(--green); }
-.opt-advanced-body { padding-top: 4px; }
+.opt-advanced-body { padding-top: 12px; }
 
 /* A consequence of the current settings — quieter than an error, louder than help text, and
    never hidden by the Explain switch. */

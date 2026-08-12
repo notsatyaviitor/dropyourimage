@@ -7,8 +7,10 @@
  * wrong one. So every `JobConfig` field is reachable here, laid out in the prototype's own
  * service-row pattern.
  *
- * Fields the *backend* does not implement are absent rather than shown-and-ignored. The one
- * exception is PSD, which is real but needs Adobe credentials — it says so instead of pretending.
+ * Fields the *backend* does not implement are absent rather than shown-and-ignored.
+ *
+ * **Layered PSD is currently hidden** behind `SHOW_PSD`, on client request. It is implemented and
+ * working — the flag hides the control, not the capability. See the comment on that constant.
  *
  * ## Reachable, but not all at once
  *
@@ -58,6 +60,19 @@ const SIZE_PRESETS: { label: string; w: number; h: number }[] = [
 // JPEG has always had, and the backend rejects the combination outright.
 const RASTER_FORMATS: OutputFormat[] = ['png', 'jpeg', 'tiff', 'webp', 'bmp', 'eps']
 const NO_ALPHA_FORMATS: OutputFormat[] = ['jpeg', 'bmp', 'eps']
+
+/**
+ * Layered PSD is hidden from the specification for now, on client request.
+ *
+ * A flag rather than a deletion: the feature works — `app/psd/` writes a real layered PSD with a
+ * vector clipping path through the pytoshop fallback, and it is covered by tests. Only the control
+ * is hidden, so turning this back on restores it with no other change.
+ *
+ * Hiding the card leaves `psd.enabled` false, which is its default, so nothing can request a PSD
+ * from here while it is off. A PSD *upload* still comes back as a PSD via `export.match_source` —
+ * that is a different question ("give me my format back") and is unaffected.
+ */
+const SHOW_PSD = false
 
 export function SpecificationStep({
   config,
@@ -165,7 +180,7 @@ export function SpecificationStep({
             <div>
               <div className="spec-card-name">POC Configuration</div>
               <div className="spec-card-desc">
-                clipping · background {background.transparent ? 'transparent' : background.color} ·{' '}
+                background removal · {background.transparent ? 'transparent' : background.color} ·{' '}
                 {size.match_source ? 'original size' : `${size.width}×${size.height}`} ·{' '}
                 {centring.mode === 'bbox' ? 'bounding box' : 'centroid'}
               </div>
@@ -178,11 +193,11 @@ export function SpecificationStep({
           </div>
 
           <div className="service-rows">
-            {/* ── Clipping ───────────────────────────────────────── */}
+            {/* ── Background Removal ─────────────────────────────── */}
             <ServiceRow
-              icon={<ClippingIcon />}
+              icon={<BackgroundRemovalIcon />}
               iconClass="srow-icon-bg"
-              name="Clipping"
+              name="Background Removal"
               detail="Remove the original background. The only step in this pipeline that calls an AI service — everything below is deterministic code."
               alwaysOn
             >
@@ -318,35 +333,69 @@ export function SpecificationStep({
               iconClass="srow-icon-bg"
               name="Background Services"
               detail="Replace the removed background with a solid colour, or leave it transparent."
-              enabled={!background.transparent}
-              onToggle={(on) => setBackground({ transparent: !on })}
-              toggleTitle="Off = transparent output (PNG alpha preserved)"
+              alwaysOn
             >
+              {/*
+                Transparency is a first-class choice here, beside the colour, rather than something
+                you reach by switching the whole service OFF — which is how it used to work, and
+                which hid the colour box the moment you found it. Two problems with that: "turn
+                Background Services off" does not read as "give me a transparent PNG", and a user
+                looking for transparency saw nothing but a colour picker. Client feedback, and
+                fair.
+
+                The colour row stays mounted and visible in both modes, greyed when transparent, so
+                the setting you picked earlier is still legible and comes back untouched when you
+                switch away.
+              */}
+              <p className="opt-sublabel">Background</p>
+              <div className="opt-radio-row">
+                <label className="opt-radio">
+                  <input
+                    type="radio"
+                    name="bgmode"
+                    checked={!background.transparent}
+                    onChange={() => setBackground({ transparent: false })}
+                  />
+                  Solid colour
+                </label>
+                <label className="opt-radio">
+                  <input
+                    type="radio"
+                    name="bgmode"
+                    checked={background.transparent}
+                    onChange={() => setBackground({ transparent: true })}
+                  />
+                  Transparent
+                </label>
+              </div>
+
+              <p className="opt-sublabel">Replacement colour</p>
+              <div className={`color-input-row${background.transparent ? ' opt-disabled' : ''}`}>
+                <div className="color-swatch" style={{ background: background.color ?? '#FFFFFF' }}>
+                  <input
+                    type="color"
+                    className="opt-color-picker"
+                    disabled={background.transparent}
+                    value={normaliseHex(background.color)}
+                    onChange={(e) => setBackground({ color: e.target.value.toUpperCase() })}
+                  />
+                </div>
+                <input
+                  type="text"
+                  className="opt-input hex-input"
+                  maxLength={7}
+                  placeholder="#RRGGBB"
+                  disabled={background.transparent}
+                  value={background.color ?? ''}
+                  onChange={(e) => setBackground({ color: e.target.value })}
+                />
+              </div>
               {background.transparent ? (
                 <p className="opt-note">
                   Transparent output — JPEG, BMP and EPS are unavailable, since none carries alpha.
                 </p>
               ) : (
                 <>
-                  <p className="opt-sublabel">Replacement colour</p>
-                  <div className="color-input-row">
-                    <div className="color-swatch" style={{ background: background.color ?? '#FFFFFF' }}>
-                      <input
-                        type="color"
-                        className="opt-color-picker"
-                        value={normaliseHex(background.color)}
-                        onChange={(e) => setBackground({ color: e.target.value.toUpperCase() })}
-                      />
-                    </div>
-                    <input
-                      type="text"
-                      className="opt-input hex-input"
-                      maxLength={7}
-                      placeholder="#RRGGBB"
-                      value={background.color ?? ''}
-                      onChange={(e) => setBackground({ color: e.target.value })}
-                    />
-                  </div>
                   {!hexValid && <p className="opt-error">Enter a hex colour like #F5F5F5 or #FFF.</p>}
                   {explain && (
                     <p className="opt-help">
@@ -651,53 +700,55 @@ export function SpecificationStep({
             </ServiceRow>
 
             {/* ── PSD ────────────────────────────────────────────── */}
-            <ServiceRow
-              icon={<PsdIcon />}
-              iconClass="srow-icon-size"
-              name="Layered PSD"
-              detail="Deliver a layered PSD with a vector clipping path, alongside the raster outputs."
-              enabled={psd.enabled}
-              onToggle={(on) => setPsd({ enabled: on })}
-            >
-              {!adobeConfigured && (
-                <div className="method-poc-banner">
-                  Adobe Photoshop API credentials are not configured on this server, so the PSD is
-                  written by the pure-Python fallback. Layers and the clipping path are real; the
-                  Adobe path is untested. See docs/PSD.md.
-                </div>
-              )}
-              <Advanced>
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={psd.vector_clipping_path}
-                  onChange={(e) => setPsd({ vector_clipping_path: e.target.checked })}
-                />
-                Include a vector clipping path
-              </label>
-              <div className="psd-names">
-                {(
-                  [
-                    ['product_layer_name', 'Product layer'],
-                    ['shadow_layer_name', 'Shadow layer'],
-                    ['background_layer_name', 'Background layer'],
-                    ['path_name', 'Path name'],
-                  ] as const
-                ).map(([key, label]) => (
-                  <div key={key} className="psd-name-field">
-                    <label>{label}</label>
-                    <input
-                      type="text"
-                      className="opt-input"
-                      maxLength={63}
-                      value={psd[key]}
-                      onChange={(e) => setPsd({ [key]: e.target.value } as Partial<PsdSpec>)}
-                    />
+            {SHOW_PSD && (
+              <ServiceRow
+                icon={<PsdIcon />}
+                iconClass="srow-icon-size"
+                name="Layered PSD"
+                detail="Deliver a layered PSD with a vector clipping path, alongside the raster outputs."
+                enabled={psd.enabled}
+                onToggle={(on) => setPsd({ enabled: on })}
+              >
+                {!adobeConfigured && (
+                  <div className="method-poc-banner">
+                    Adobe Photoshop API credentials are not configured on this server, so the PSD is
+                    written by the pure-Python fallback. Layers and the clipping path are real; the
+                    Adobe path is untested. See docs/PSD.md.
                   </div>
-                ))}
-              </div>
-              </Advanced>
-            </ServiceRow>
+                )}
+                <Advanced>
+                <label className="opt-check">
+                  <input
+                    type="checkbox"
+                    checked={psd.vector_clipping_path}
+                    onChange={(e) => setPsd({ vector_clipping_path: e.target.checked })}
+                  />
+                  Include a vector clipping path
+                </label>
+                <div className="psd-names">
+                  {(
+                    [
+                      ['product_layer_name', 'Product layer'],
+                      ['shadow_layer_name', 'Shadow layer'],
+                      ['background_layer_name', 'Background layer'],
+                      ['path_name', 'Path name'],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <div key={key} className="psd-name-field">
+                      <label>{label}</label>
+                      <input
+                        type="text"
+                        className="opt-input"
+                        maxLength={63}
+                        value={psd[key]}
+                        onChange={(e) => setPsd({ [key]: e.target.value } as Partial<PsdSpec>)}
+                      />
+                    </div>
+                  ))}
+                </div>
+                </Advanced>
+              </ServiceRow>
+            )}
           </div>
         </div>
       </div>
@@ -745,29 +796,39 @@ function ServiceRow({
 }) {
   const open = alwaysOn || enabled
   return (
-    <div className="service-row">
-      <div className="service-row-left">
+    <section className={`service-row${open ? '' : ' is-off'}`}>
+      {/*
+        Description on the left, controls on the right — the layout settings pages use, and the
+        answer to a real problem the card grid could not solve: Background Removal holds one input while
+        Output Size holds a dozen, so any multi-column grid of boxes left one card a third the
+        height of its neighbour with the difference as dead space. In a single column, unequal
+        content cannot produce a void; each section is simply as tall as it needs to be.
+      */}
+      <div className="srow-aside">
         <div className="srow-header">
           <div className={`srow-icon ${iconClass}`}>{icon}</div>
-          <div>
-            <div className="service-row-name">{name}</div>
-            <div className="service-row-detail">{detail}</div>
-          </div>
+          <div className="service-row-name">{name}</div>
         </div>
-        <div className={`service-options${open ? ' open' : ''}`}>{children}</div>
+        <p className="service-row-detail">{detail}</p>
+        {/*
+          No switch for a stage that cannot be switched off. Rendering a disabled toggle reading
+          "ALWAYS ON" put four identical dead controls down the page, each inviting a click that
+          does nothing. Sections that are genuinely optional still get a real one.
+        */}
+        {!alwaysOn && (
+          <label className="toggle-switch" title={toggleTitle}>
+            <input
+              type="checkbox"
+              checked={open}
+              onChange={(e) => onToggle?.(e.target.checked)}
+            />
+            <span className="toggle-track" />
+            <span className="toggle-label">{open ? 'On' : 'Off'}</span>
+          </label>
+        )}
       </div>
-      <div className="toggle-wrap">
-        <label className="toggle-switch" title={alwaysOn ? 'Always applied' : toggleTitle}>
-          <input
-            type="checkbox"
-            checked={open}
-            disabled={alwaysOn}
-            onChange={(e) => onToggle?.(e.target.checked)}
-          />
-          <span className="toggle-track" />
-        </label>
-      </div>
-    </div>
+      <div className={`service-options${open ? ' open' : ''}`}>{children}</div>
+    </section>
   )
 }
 
@@ -786,7 +847,7 @@ function normaliseHex(v: string | null | undefined): string {
   return '#FFFFFF'
 }
 
-function ClippingIcon() {
+function BackgroundRemovalIcon() {
   return (
     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="4.5" cy="7" r="2" />

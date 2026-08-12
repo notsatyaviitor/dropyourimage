@@ -48,14 +48,12 @@ export function WizardHeader({
         })}
       </div>
 
-      <button type="button" className="btn-logout" disabled title="No auth in this POC">
-        Log out
-        <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M8 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4" />
-          <polyline points="13,7 17,10 13,13" />
-          <line x1="17" y1="10" x2="7" y2="10" />
-        </svg>
-      </button>
+      {/*
+        No "Log out". There is no authentication in this application — the deployment puts a gate in
+        front of it instead (see docs/DEPLOY.md) — so the control had nothing to log out of and was
+        rendered disabled. A dead control implies a feature that exists somewhere, which invites the
+        question "why can't I sign out?" about a session that was never created.
+      */}
     </header>
   )
 }

@@ -11,14 +11,22 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { DEFAULT_JOB_CONFIG, FALLBACK_LIMITS, type JobConfig, type ServerLimits } from '@/api/types'
+import {
+  DEFAULT_JOB_CONFIG,
+  FALLBACK_LIMITS,
+  type JobConfig,
+  type SampleList,
+  type ServerLimits,
+} from '@/api/types'
 import {
   ApiError,
   UPLOAD_BATCH_BYTES,
   UPLOAD_BATCH_SIZE,
   cancelJob,
+  createJobFromSamples,
   createJobInBatches,
   getLimits,
+  getSamples,
   type UploadProgress,
 } from '@/api/client'
 import { useJobPolling } from '@/api/useJobPolling'
@@ -50,6 +58,10 @@ function App() {
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [upload, setUpload] = useState<UploadProgress | null>(null)
   const [limits, setLimits] = useState<ServerLimits>(FALLBACK_LIMITS)
+  const [samples, setSamples] = useState<SampleList>({ files: [], total_bytes: 0 })
+  // Samples the operator dismissed with the row's ×. Kept here rather than in the step because it
+  // decides what the job request contains, not just what the list looks like.
+  const [dismissedSamples, setDismissedSamples] = useState<string[]>([])
   const [cancelling, setCancelling] = useState(false)
 
   const { status, error: pollError, refresh } = useJobPolling(jobId)
@@ -59,6 +71,9 @@ function App() {
   useEffect(() => {
     let live = true
     getLimits().then((l) => live && setLimits(l))
+    // Server-side demo images. Empty when none are configured, and the Upload step then
+    // behaves exactly as it did before — nothing to hide, nothing to explain.
+    getSamples().then((s) => live && setSamples(s))
     return () => {
       live = false
     }
@@ -85,24 +100,33 @@ function App() {
    * the tab and kills it before anything is sent. The job is still ONE job with one `JobConfig` —
    * the five tabs are one pipeline, not five tools (frontend/CLAUDE.md).
    */
+  /**
+   * Nothing picked, but the server offers samples: this is a sample run.
+   *
+   * Derived rather than a toggle, so there is one rule and no third state to get wrong — the
+   * moment a real file is added, it is an ordinary upload again.
+   */
+  const activeSamples = samples.files.filter((f) => !dismissedSamples.includes(f.name))
+  const usingSamples = picked.length === 0 && activeSamples.length > 0
+
   async function handleStart() {
-    if (picked.length === 0) return
+    if (picked.length === 0 && !usingSamples) return
     setSubmitting(true)
     setSubmitError(null)
     setUpload(null)
     try {
-      const created = await createJobInBatches(
-        picked.map((p) => p.file),
-        config,
-        {
-          // Both budgets come from the server where it publishes one, so a deployment that
-          // tightens its archive limits tightens the client automatically rather than having the
-          // client discover it as a 413 halfway through an upload.
-          batchBytes: Math.min(limits.max_batch_bytes, UPLOAD_BATCH_BYTES),
-          batchSize: Math.min(limits.max_batch_images, UPLOAD_BATCH_SIZE),
-          onProgress: setUpload,
-        },
-      )
+      // Samples never touch the browser: the server already holds them, so this posts a flag
+      // rather than half a gigabyte of PSD. Same endpoint, same job, same pipeline.
+      const created = usingSamples
+        ? await createJobFromSamples(config, activeSamples.map((f) => f.name))
+        : await createJobInBatches(picked.map((p) => p.file), config, {
+            // Both budgets come from the server where it publishes one, so a deployment that
+            // tightens its archive limits tightens the client automatically rather than having
+            // the client discover it as a 413 halfway through an upload.
+            batchBytes: Math.min(limits.max_batch_bytes, UPLOAD_BATCH_BYTES),
+            batchSize: Math.min(limits.max_batch_images, UPLOAD_BATCH_SIZE),
+            onProgress: setUpload,
+          })
       setJobId(created.job_id)
     } catch (e) {
       setSubmitError(e instanceof ApiError ? e.message : 'Could not start the job.')
@@ -135,6 +159,9 @@ function App() {
     // them (`useObjectUrl`), so unmounting the list releases them. Holding one per picked file was
     // the thing that made a 400-file selection unsurvivable.
     setPicked([])
+    // A new order starts from a clean slate, samples included — dismissing one for the last order
+    // should not silently keep it out of the next.
+    setDismissedSamples([])
     setJobId(null)
     setSubmitError(null)
     setCancelling(false)
@@ -184,6 +211,13 @@ function App() {
               files={picked}
               config={config}
               limits={limits}
+              samples={{
+                files: activeSamples,
+                total_bytes: activeSamples.reduce((n, f) => n + f.size_bytes, 0),
+              }}
+              onDismissSample={(name) =>
+                setDismissedSamples((prev) => (prev.includes(name) ? prev : [...prev, name]))
+              }
               submitting={submitting}
               upload={upload}
               submitError={submitError ?? pollError}
@@ -212,6 +246,7 @@ function App() {
           jobId={jobId}
           upload={upload}
           uploadTotal={picked.length}
+          usingSamples={usingSamples}
           cancelling={cancelling}
           onCancel={handleCancel}
         />

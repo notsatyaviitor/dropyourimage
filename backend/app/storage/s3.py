@@ -37,11 +37,18 @@ class S3Storage:
             Bucket=self._bucket, Key=key, Body=data, ContentType=content_type
         )
 
-    def put_stream(self, key: str, fileobj: BinaryIO, content_type: str) -> None:
+    def put_stream(
+        self,
+        key: str,
+        fileobj: BinaryIO,
+        content_type: str,
+        content_disposition: str | None = None,
+    ) -> None:
         """Multipart upload from the file object — see StorageBackend.put_stream."""
-        self._client.upload_fileobj(
-            fileobj, self._bucket, key, ExtraArgs={"ContentType": content_type}
-        )
+        extra = {"ContentType": content_type}
+        if content_disposition:
+            extra["ContentDisposition"] = content_disposition
+        self._client.upload_fileobj(fileobj, self._bucket, key, ExtraArgs=extra)
 
     def get(self, key: str) -> bytes:
         try:

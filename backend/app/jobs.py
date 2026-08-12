@@ -573,6 +573,55 @@ def _finalise(
     progress.flush()
 
 
+#: Prefix on the delivered zip, so a processed order is never mistaken for the source folder.
+BUNDLE_PREFIX = "AI_"
+
+
+def bundle_filename(done: list[ImageResult], created_at: datetime | None = None) -> str:
+    """What the browser should save the download as.
+
+    Named after the order rather than left as `outputs.zip`, which every job arrived as and which
+    is indistinguishable in a downloads folder the moment a second order lands.
+
+    **One image gives its own name; several do not.** A batch used to take the first image's name,
+    so a four-product order downloaded as `AI_Avenafyt 100ml 2.zip` — a file that names one product
+    and silently hides the other three. That is worse than a generic name, because it reads as
+    correct. A multi-image order is identified by its size and the time it was placed:
+
+        1 image    ->  AI_Avenafyt 100ml 2.zip
+        4 images   ->  AI_4-files_2026-08-12_1443.zip
+
+    The timestamp comes from the job's own `created_at`, not from the clock at packaging time, so
+    re-downloading an order always yields the same filename. Minutes are included because a client
+    placing several orders in a day is the normal case, and a date alone would collide.
+
+    Sanitised because this ends up in a `Content-Disposition` header, where a quote or a newline
+    is a header-injection bug rather than a cosmetic one, and a path separator would suggest a
+    directory that does not exist.
+    """
+    if len(done) == 1:
+        name = done[0].source_name
+        stem = name.rsplit(".", 1)[0] or name
+        safe = "".join(c for c in stem if c.isprintable() and c not in '"\\/:*?<>|\r\n').strip()
+        return f"{BUNDLE_PREFIX}{safe or 'order'}.zip"
+
+    stamp = (created_at or _now()).strftime("%Y-%m-%d_%H%M")
+    return f"{BUNDLE_PREFIX}{len(done)}-files_{stamp}.zip"
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 6266 header value, with a UTF-8 fallback for non-ASCII names.
+
+    Both forms are sent: `filename` for anything old, `filename*` for the real name. A client
+    filename can carry accents or CJK, and a bare `filename=` is ASCII-only — so without the
+    starred form those orders download under a mangled name.
+    """
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
 def _write_bundle(
     done: list[ImageResult],
     job_id: str,
@@ -618,7 +667,12 @@ def _write_bundle(
         # away at the last step. Measured against this session's own assets: 200 images at source
         # resolution is ~45 GB of TIFFs plus returned originals — an OOM on a job that had already
         # succeeded and paid for every image.
-        storage.put_stream(key, scratch, "application/zip")
+        storage.put_stream(
+            key,
+            scratch,
+            "application/zip",
+            content_disposition=_content_disposition(bundle_filename(done, status.created_at)),
+        )
 
 
 def _add_unwritable_originals(

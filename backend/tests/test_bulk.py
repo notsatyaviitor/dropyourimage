@@ -1069,10 +1069,10 @@ class TestSourceFormatOnly:
         used = {"stream": 0, "bytes": 0}
         real_stream, real_put = storage.put_stream, storage.put
 
-        def spy_stream(key, fileobj, content_type):
+        def spy_stream(key, fileobj, content_type, content_disposition=None):
             if key.endswith("outputs.zip"):
                 used["stream"] += 1
-            return real_stream(key, fileobj, content_type)
+            return real_stream(key, fileobj, content_type, content_disposition)
 
         def spy_put(key, data, content_type):
             if key.endswith("outputs.zip"):
@@ -1088,6 +1088,21 @@ class TestSourceFormatOnly:
         assert status["bundle_url"], "the bundle must still be produced"
         assert used["stream"] == 1, "bundle must go through put_stream"
         assert used["bytes"] == 0, "bundle must never be read into a bytes object"
+
+    async def test_the_bundle_downloads_under_an_ai_prefixed_source_name(self, client):
+        """`outputs.zip` was indistinguishable in a downloads folder the moment a second order
+        landed. Client feedback: name it after the upload, prefixed `AI_`.
+
+        It has to be `Content-Disposition` on the stored object, not the anchor's `download`
+        attribute: the link points straight at cloud storage, and `download` is ignored
+        cross-origin.
+        """
+        r = await upload(client, zip_of({"product-42.png": tiny_png()}))
+        status = (await client.get(f"/jobs/{r.json()['job_id']}")).json()
+
+        bundle = await client.get(status["bundle_url"])
+        assert bundle.status_code == 200
+        assert 'filename="AI_product-42.zip"' in bundle.headers["content-disposition"]
 
     async def test_a_writable_source_does_not_get_a_duplicate_original(self, client):
         """PNG round-trips, so its 'original' would just be a second copy of the same format."""

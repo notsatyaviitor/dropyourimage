@@ -32,8 +32,11 @@ pulled from over any prose description, including this one.
 - Import from `src/theme/tokens.ts` everywhere. Do not hardcode hex values anywhere else — if a
   colour isn't in `tokens.ts`, that's a sign to go re-check the live CSS rather than guess.
 - Reuse their card-grid pattern for the results grid and their button styling throughout.
-- **Use their vocabulary, not ours.** Their existing services map onto this POC — *Clipping* and *Background
-  Services*. Name tabs with their terms.
+- **Use their vocabulary, not ours** — but take it from the client, not from the marketing site.
+  The specification sections were originally named after dropyourimage.com's own services,
+  *Clipping* and *Background Services*. The client asked on 12 Aug 2026 for *Clipping* to become
+  **Background Removal**, so that is the name. Their instruction outranks the website; do not
+  "restore" the site's wording.
 - English only. Skip their EN/NL/DE language switcher.
 
 ## No paid component kit

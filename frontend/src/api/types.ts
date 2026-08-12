@@ -160,6 +160,21 @@ export interface BackgroundSpec {
   decontaminate_edges: boolean
 }
 
+/** One server-side demo image — see `GET /samples`. */
+export interface SampleFile {
+  name: string
+  size_bytes: number
+}
+
+/**
+ * `GET /samples`. Empty when the server has none configured, which is the signal to hide the
+ * option rather than show an error — a demo convenience must degrade to absent.
+ */
+export interface SampleList {
+  files: SampleFile[]
+  total_bytes: number
+}
+
 export interface SizeSpec {
   width: number
   height: number

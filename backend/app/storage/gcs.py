@@ -88,9 +88,18 @@ class GcsStorage:
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._bucket.blob(key).upload_from_string(data, content_type=content_type)
 
-    def put_stream(self, key: str, fileobj: BinaryIO, content_type: str) -> None:
+    def put_stream(
+        self,
+        key: str,
+        fileobj: BinaryIO,
+        content_type: str,
+        content_disposition: str | None = None,
+    ) -> None:
         """Resumable upload straight from the file object — see StorageBackend.put_stream."""
-        self._bucket.blob(key).upload_from_file(fileobj, content_type=content_type)
+        blob = self._bucket.blob(key)
+        if content_disposition:
+            blob.content_disposition = content_disposition
+        blob.upload_from_file(fileobj, content_type=content_type)
 
     def get(self, key: str) -> bytes:
         from google.cloud.exceptions import NotFound

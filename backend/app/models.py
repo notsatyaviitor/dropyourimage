@@ -837,6 +837,28 @@ class JobCreated(StrictModel):
     )
 
 
+class SampleFile(StrictModel):
+    """One image the server can start a job from without an upload."""
+
+    name: str
+    size_bytes: int
+
+
+class SampleList(StrictModel):
+    """`GET /samples` response.
+
+    Empty when `SAMPLES_DIR` is unset or missing — that is the signal for the UI to hide the
+    option rather than an error, because a demo convenience must never break a deployment.
+
+    `total_bytes` is published so the UI can show the real weight of what it is about to process.
+    It matters here more than for an upload: the client's PSDs are ~130 MB each, and the whole
+    reason these live server-side is that four of them in a browser tab is half a gigabyte.
+    """
+
+    files: list[SampleFile] = Field(default_factory=list)
+    total_bytes: int = 0
+
+
 class CostEstimate(StrictModel):
     """`POST /jobs/estimate` response.
 

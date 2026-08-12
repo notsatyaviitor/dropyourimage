@@ -47,6 +47,7 @@ from app.api.deps import get_jobstore, get_storage
 from app.core import errors
 from app.core.jobstore import JobStore
 from app.core.settings import Settings, get_settings
+from app import samples
 from app.jobs import CONFIG_KEY, run_job_async, source_key
 from app.models import (
     CostEstimate,
@@ -55,6 +56,8 @@ from app.models import (
     JobCreated,
     JobState,
     JobStatus,
+    SampleFile,
+    SampleList,
 )
 from app.storage.base import StorageBackend, job_key
 
@@ -78,8 +81,25 @@ def health(settings: Settings = Depends(_settings_dep)) -> dict:
 
 @router.post("/jobs", response_model=JobCreated, status_code=202)
 async def create_job(
-    file: UploadFile = File(..., description="A .zip of product images"),
+    file: UploadFile | None = File(
+        None,
+        description="A .zip of product images. Omit only when use_samples is true.",
+    ),
     config: str = Form(..., description="JobConfig as JSON"),
+    use_samples: bool = Form(
+        False,
+        description=(
+            "Build this job from the server's SAMPLES_DIR instead of an upload. The samples are "
+            "processed exactly like uploaded files — same archive, same pipeline, same caps."
+        ),
+    ),
+    sample_names: list[str] | None = Form(
+        None,
+        description=(
+            "Which samples to use, by name, when a caller has dismissed some. Omit for all of "
+            "them. Names select from the server's own listing and are never used as a path."
+        ),
+    ),
     job_id: str | None = Form(
         None,
         description=(
@@ -116,7 +136,18 @@ async def create_job(
         status = _load_draft(job_id, store)
         job_config = _stored_config(job_id, storage)
 
-    data = await _read_capped(file, settings.max_zip_bytes)
+    # Samples become an ordinary archive here and nothing downstream is aware of them: same
+    # `_accept_batch`, same caps, same storage key, same worker. That is deliberate — a demo that
+    # takes a different code path is not a demo of this product.
+    if use_samples:
+        data = _sample_archive(settings, sample_names)
+    else:
+        if file is None:
+            raise HTTPException(
+                status_code=422, detail="Provide a zip file, or set use_samples=true."
+            )
+        data = await _read_capped(file, settings.max_zip_bytes)
+
     _accept_batch(status, data, storage, settings)
     store.save(status)
 
@@ -124,6 +155,44 @@ async def create_job(
         return _created(status, job_config, accepting=True)
 
     return await _start(status, job_config, storage, store, settings)
+
+
+@router.get("/samples", response_model=SampleList)
+def get_samples(settings: Settings = Depends(_settings_dep)) -> SampleList:
+    """Demo images the server can start a job from without an upload.
+
+    Returns an empty list when `SAMPLES_DIR` is unset or missing, which is how the UI knows to hide
+    the option — a demo convenience must degrade to absent, never to an error.
+    """
+    found = samples.list_samples(settings)
+    return SampleList(
+        files=[SampleFile(name=s.name, size_bytes=s.size_bytes) for s in found],
+        total_bytes=sum(s.size_bytes for s in found),
+    )
+
+
+def _sample_archive(settings: Settings, names: list[str] | None = None) -> bytes:
+    """The requested samples as an archive, or a clear 409 if there are none to give.
+
+    A name that matches nothing is not an error on its own — `samples.resolve` drops it — but a
+    request that ends up selecting *zero* files is, because the alternative is an empty job that
+    completes successfully having done nothing.
+    """
+    try:
+        chosen = samples.resolve(settings, names)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=_NO_SAMPLES) from exc
+
+    if not chosen:
+        raise HTTPException(status_code=409, detail=_NO_SAMPLES)
+
+    try:
+        return samples.build_archive(settings, names)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=_NO_SAMPLES) from exc
+
+
+_NO_SAMPLES = "No sample images are available on this server for that request (SAMPLES_DIR)."
 
 
 @router.post("/jobs/{job_id}/start", response_model=JobCreated, status_code=202)
@@ -288,7 +357,11 @@ def get_object(
     content_type = getattr(storage, "content_type", lambda _k: "application/octet-stream")(
         object_key
     )
-    return Response(content=data, media_type=content_type)
+    # Mirrors what S3/GCS serve from the stored object, so a bundle downloads under the same
+    # `AI_<source>.zip` name in memory mode as it does in a real deployment.
+    disposition = getattr(storage, "content_disposition", lambda _k: None)(object_key)
+    headers = {"Content-Disposition": disposition} if disposition else None
+    return Response(content=data, media_type=content_type, headers=headers)
 
 
 # ---------------------------------------------------------------------------

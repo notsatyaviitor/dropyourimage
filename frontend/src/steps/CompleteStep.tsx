@@ -13,8 +13,9 @@
  *   faked, a transparent output correctly shows a checkerboard instead.
  * - Per-image state, typed errors, and every `Note` are rendered. Notes that mean "this may be the
  *   wrong object" get a banner rather than a chip, because a chip was demonstrably easy to miss.
- * - The engine that won, the measured centroid offset, and cache/cost are shown, so a reviewer can
- *   explain *why* an output looks the way it does.
+ * - The engine that won is shown, so a reviewer can explain *why* an output looks the way it
+ *   does. Diagnostics that are not defects — the notes, the centroid offset — sit collapsed
+ *   under Processing details, and no monetary figure appears anywhere on the page.
  * - Download links point at real signed asset URLs, and the batch download is the real bundle zip.
  */
 
@@ -90,8 +91,6 @@ const CRITICAL_NOTES: Partial<Record<Note, string>> = {
   hard_edged_mask:
     'Cut out by Gemini, which returns a polygon — this edge is hard, with no soft alpha. Expect a halo against saturated background colours. Re-run with Photoroom for a soft edge.',
 }
-
-const OFFSET_WARN_PX = 20
 
 /**
  * The output to put in an `<img>`, or undefined if none can be shown.
@@ -228,12 +227,15 @@ export function CompleteStep({
                 sub={config.export.formats.map((f) => f.toUpperCase()).join(' · ')}
                 cls="val-text"
               />
-              <SummaryItem
-                label="Vendor spend"
-                val={status ? `$${status.cost_usd.toFixed(4)}` : '—'}
-                sub={images.some((i) => i.cache_hit) ? 'some served from cache' : 'this job'}
-                cls="val-text"
-              />
+              {/*
+                Vendor spend was removed from the results page on client feedback: it is an
+                internal cost figure, and a per-order dollar amount on the page the customer sees
+                invites questions about margin that the page cannot answer.
+
+                The number itself is untouched — `JobStatus.cost_usd` still accumulates, is still
+                enforced against MAX_JOB_COST_USD, and is still in the API response for operators
+                and billing. This removes the display, not the accounting.
+              */}
             </div>
 
             {status && status.rate_limit_events > 0 && (
@@ -259,18 +261,17 @@ export function CompleteStep({
                   <div className="batch-title">
                     Processed batch · <span>{total}</span> images
                   </div>
-                  <div className="batch-meta">
-                    Pipeline <strong>{status?.pipeline_version}</strong> · config{' '}
-                    <strong>{status?.config_hash}</strong>
-                  </div>
+                  {/* Pipeline version and config hash removed on client feedback: they are
+                      build provenance for us, meaningless to the person collecting their images,
+                      and `config_hash` in particular reads like an error code. Both are still in
+                      the API response for support. */}
                 </div>
-                <button type="button" className="btn-rerun" onClick={onBack}>
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8">
-                    <path d="M11.5 7A4.5 4.5 0 1 1 7 2.5" strokeLinecap="round" />
-                    <polyline points="11.5,2.5 11.5,7 7,7" />
-                  </svg>
-                  Process again
-                </button>
+                {/*
+                  "Process again" removed on client feedback. It sent you back to the upload step
+                  with the same config, which reads as "redo this order" but actually starts a
+                  second paid job over the same images — an easy way to double a bill by mistake.
+                  "Create new order" at the foot of the page is the deliberate path.
+                */}
               </div>
 
               {images.length === 0 ? (
@@ -491,7 +492,6 @@ function ResultCard({
   const critical = result.notes.filter((n) => n in CRITICAL_NOTES)
   const other = result.notes.filter((n) => !(n in CRITICAL_NOTES))
   const offset = result.centroid_offset_px
-  const offCentre = offset != null && Math.max(Math.abs(offset[0]), Math.abs(offset[1])) > OFFSET_WARN_PX
   const ok = result.state === 'done'
 
   return (
@@ -577,16 +577,25 @@ function ResultCard({
         shows. Hiding them by default keeps a correct result looking correct; keeping them one
         click away means nothing about how the file was produced is unavailable.
       */}
-      {other.length > 0 && (
+      {(other.length > 0 || offset) && (
         <details className="res-details">
-          <summary className="res-details-summary">Processing details ({other.length})</summary>
-          <div className="res-notes">
-            {other.map((n) => (
-              <span className="res-note-chip" key={n} title={NOTE_LABELS[n]}>
-                {n.replace(/_/g, ' ')}
-              </span>
-            ))}
-          </div>
+          <summary className="res-details-summary">
+            Processing details ({other.length + (offset ? 1 : 0)})
+          </summary>
+          {other.length > 0 && (
+            <div className="res-notes">
+              {other.map((n) => (
+                <span className="res-note-chip" key={n} title={NOTE_LABELS[n]}>
+                  {n.replace(/_/g, ' ')}
+                </span>
+              ))}
+            </div>
+          )}
+          {offset && (
+            <div className="res-meta-row">
+              centroid offset {offset[0].toFixed(1)}px, {offset[1].toFixed(1)}px
+            </div>
+          )}
         </details>
       )}
 
@@ -628,16 +637,30 @@ function ResultCard({
           {result.chosen_engine && (
             <div className="res-meta-row">
               engine <strong>{result.chosen_engine}</strong>
+              {/*
+                Per-image cost removed with the rest of the pricing. "from cache" stays: it says
+                this image was not re-processed, which explains why it returned instantly and why
+                re-running a job to change colour or size is free — useful without being a figure.
+              */}
               {result.cache_hit && ' · from cache'}
-              {!result.cache_hit && result.cost_usd > 0 && ` · $${result.cost_usd.toFixed(4)}`}
             </div>
           )}
-          {offset && (
-            <div className={`res-meta-row${offCentre ? ' res-meta-warn' : ''}`}>
-              centroid offset {offset[0].toFixed(1)}px, {offset[1].toFixed(1)}px
-              {offCentre && ' — far off centre, mask may cover more than one object'}
-            </div>
-          )}
+          {/*
+            The centroid offset no longer appears on the card, and no longer claims anything.
+
+            It used to read "far off centre, mask may cover more than one object" past a fixed
+            20px threshold. That threshold is not evidence of anything: it is absolute pixels
+            against a canvas of any size, so 25px on a 500px output — 5%, a normal placement for a
+            product with a preserved shadow — produced an alarming orange warning on a perfectly
+            good cut-out. Reported by the client on exactly that case.
+
+            A real "wrong object" signal already exists and is specific: `busy_scene`,
+            `subject_not_found` and `scene_largest_object` all measure the mask rather than
+            guessing from where the product landed. This added nothing they do not say better.
+
+            The raw number stays available under Processing details for an operator; it is a
+            measurement, so it is reported without a verdict attached.
+          */}
           {result.candidates.length > 1 && (
             <details>
               <summary>compare {result.candidates.length} candidates</summary>

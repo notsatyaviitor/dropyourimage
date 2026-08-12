@@ -74,6 +74,16 @@ class Settings(BaseSettings):
     s3_secret_key: str = "minioadmin"
     signed_url_ttl_seconds: int = 900
 
+    # --- demo samples --------------------------------------------------------
+    #
+    # Directory of images the API can start a job from without a browser upload. The client's PSDs
+    # are ~130 MB each, so pre-loading four into a tab is half a gigabyte fetched, held and sent
+    # back; keeping them server-side makes that zero bytes over the wire.
+    #
+    # Empty (the default) turns the feature off entirely: `/samples` returns none and the UI hides
+    # the option. A demo convenience must never be able to fail a deployment.
+    samples_dir: str = ""
+
     # --- deployment ----------------------------------------------------------
     #
     # Comma-separated origins the browser may call this API from. Defaults to "*" so local

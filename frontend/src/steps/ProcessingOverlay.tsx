@@ -31,6 +31,7 @@ export function ProcessingOverlay({
   jobId,
   upload,
   uploadTotal = 0,
+  usingSamples = false,
   cancelling,
   onCancel,
 }: {
@@ -39,6 +40,8 @@ export function ProcessingOverlay({
   upload?: UploadProgress | null
   /** How many files the user picked. Known before the first batch lands, unlike `upload`. */
   uploadTotal?: number
+  /** Sample jobs upload nothing — the server already holds the files. */
+  usingSamples?: boolean
   cancelling?: boolean
   onCancel?: () => void
 }) {
@@ -65,25 +68,45 @@ export function ProcessingOverlay({
   // Stage rows are marked done proportionally so the panel is informative without inventing timings.
   const stagesDone = total > 0 && !uploading ? Math.floor((done / total) * STAGES.length) : 0
 
-  /** Upload is a real phase of its own, so it gets its own row rather than borrowing stage 1's. */
-  const rows: { name: string; desc: string; state: string }[] = uploading
-    ? [
-        {
-          name: 'Uploading your files',
-          desc: upload
-            ? `Batch ${upload.batch} of ${upload.batches} · ${sent} of ${batchTotal} sent`
-            : 'Packaging the first batch',
-          state: 'running',
-        },
-        ...STAGES.map((s) => ({ ...s, state: '' })),
-      ]
-    : STAGES.map((s, i) => ({
-        ...s,
-        state: i < stagesDone ? 'done' : i === stagesDone && !terminal ? 'running' : '',
-      }))
+  /**
+   * Upload is a real phase of its own, so it gets its own row rather than borrowing stage 1's —
+   * and it **stays on the list once it finishes**, marked Done.
+   *
+   * It used to be dropped from the array the moment a job id existed, so the row vanished rather
+   * than completing. A step that disappears reads as a step that was skipped or failed, and it
+   * also made the list jump by one line at exactly the moment the user was watching it.
+   */
+  const uploadRow = {
+    name: usingSamples ? 'Preparing sample files' : 'Uploading your files',
+    desc: usingSamples
+      ? 'Held on the server — nothing to upload'
+      : uploading
+        ? upload
+          ? `Batch ${upload.batch} of ${upload.batches} · ${sent} of ${batchTotal} sent`
+          : 'Packaging the first batch'
+        : `${total || batchTotal} file${(total || batchTotal) === 1 ? '' : 's'} received`,
+    // Samples are ready the moment the job exists, so that row is never in a running state.
+    state: uploading && !usingSamples ? 'running' : 'done',
+  }
+
+  const rows: { name: string; desc: string; state: string }[] = [
+    uploadRow,
+    ...STAGES.map((s, i) => ({
+      ...s,
+      state: uploading
+        ? ''
+        : i < stagesDone
+          ? 'done'
+          : i === stagesDone && !terminal
+            ? 'running'
+            : '',
+    })),
+  ]
 
   const caption = uploading
-    ? upload
+    ? usingSamples
+      ? 'Starting the job from the server’s sample files…'
+      : upload
       ? `Uploading batch ${upload.batch} of ${upload.batches} — ${sent} of ${batchTotal} images sent…`
       : `Packaging ${batchTotal || 'your'} image${batchTotal === 1 ? '' : 's'} for upload…`
     : !status

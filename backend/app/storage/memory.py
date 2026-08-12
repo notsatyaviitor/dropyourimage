@@ -11,11 +11,16 @@ from __future__ import annotations
 class MemoryStorage:
     def __init__(self) -> None:
         self._objects: dict[str, tuple[bytes, str]] = {}
+        # Mirrors what S3/GCS store alongside the object, so the memory-mode passthrough route
+        # can serve the same download filename the cloud backends do.
+        self._dispositions: dict[str, str] = {}
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._objects[key] = (data, content_type)
 
-    def put_stream(self, key: str, fileobj, content_type: str) -> None:
+    def put_stream(
+        self, key: str, fileobj, content_type: str, content_disposition: str | None = None
+    ) -> None:
         """Reads it all in — which is exactly what this backend is: everything is already RAM.
 
         The streaming contract exists for S3/GCS, where the bundle can be tens of gigabytes.
@@ -23,6 +28,8 @@ class MemoryStorage:
         stream to.
         """
         self._objects[key] = (fileobj.read(), content_type)
+        if content_disposition:
+            self._dispositions[key] = content_disposition
 
     def get(self, key: str) -> bytes:
         try:
@@ -41,5 +48,9 @@ class MemoryStorage:
     def exists(self, key: str) -> bool:
         return key in self._objects
 
+    def content_disposition(self, key: str) -> str | None:
+        return self._dispositions.get(key)
+
     def clear(self) -> None:
         self._objects.clear()
+        self._dispositions.clear()

@@ -7,6 +7,7 @@ import type {
   ServerLimits,
 } from './types'
 import { FALLBACK_LIMITS } from './types'
+import type { SampleList } from './types'
 import { wrapImagesInZip } from '@/lib/zip'
 
 /**
@@ -43,6 +44,44 @@ export class ApiError extends Error {
 export function resolveAssetUrl(url: string): string {
   if (/^https?:\/\//.test(url)) return url
   return `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`
+}
+
+/**
+ * Sample images the server can process without an upload.
+ *
+ * Returns an empty list when the server has none configured, which is how the UI knows to hide the
+ * option. Failure is silent for the same reason: a demo convenience must never block the page that
+ * real work happens on.
+ */
+export async function getSamples(): Promise<SampleList> {
+  try {
+    const r = await fetch(`${API_BASE}/samples`)
+    if (!r.ok) return { files: [], total_bytes: 0 }
+    return (await r.json()) as SampleList
+  } catch {
+    return { files: [], total_bytes: 0 }
+  }
+}
+
+/**
+ * Start a job from the server's sample images.
+ *
+ * No file is sent. The client's PSDs are ~130 MB each, so four of them fetched into a tab and
+ * posted back is half a gigabyte moved to demonstrate something the server already has on disk.
+ * The server builds the same archive an upload would produce, so the job is processed identically.
+ */
+export async function createJobFromSamples(
+  config: JobConfig,
+  names?: string[],
+): Promise<JobCreated> {
+  const body = new FormData()
+  body.set('config', JSON.stringify(config))
+  body.set('use_samples', 'true')
+  // Repeated field, which is how FastAPI reads a list from a form. Omitted entirely when the whole
+  // set is wanted, so the common case sends nothing extra. Names are matched against the server's
+  // own listing — they are never treated as paths.
+  for (const name of names ?? []) body.append('sample_names', name)
+  return post<JobCreated>('/jobs', body)
 }
 
 export async function createJob(file: File, config: JobConfig): Promise<JobCreated> {
