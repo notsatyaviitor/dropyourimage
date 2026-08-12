@@ -15,6 +15,15 @@ class MemoryStorage:
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._objects[key] = (data, content_type)
 
+    def put_stream(self, key: str, fileobj, content_type: str) -> None:
+        """Reads it all in — which is exactly what this backend is: everything is already RAM.
+
+        The streaming contract exists for S3/GCS, where the bundle can be tens of gigabytes.
+        Memory mode only ever runs small jobs (`INLINE_JOB_MAX_IMAGES`), so there is nothing to
+        stream to.
+        """
+        self._objects[key] = (fileobj.read(), content_type)
+
     def get(self, key: str) -> bytes:
         try:
             return self._objects[key][0]

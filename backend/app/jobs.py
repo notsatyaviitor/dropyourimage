@@ -613,7 +613,12 @@ def _write_bundle(
             _add_unwritable_originals(bundle, done, job_id, storage, status, config, settings)
 
         scratch.seek(0)
-        storage.put(key, scratch.read(), "application/zip")
+        # Streamed, NOT `storage.put(key, scratch.read(), ...)`. The temp file above exists so a
+        # multi-gigabyte bundle is never a `bytes` object, and reading it back here threw that
+        # away at the last step. Measured against this session's own assets: 200 images at source
+        # resolution is ~45 GB of TIFFs plus returned originals — an OOM on a job that had already
+        # succeeded and paid for every image.
+        storage.put_stream(key, scratch, "application/zip")
 
 
 def _add_unwritable_originals(
@@ -673,11 +678,17 @@ def _add_unwritable_originals(
 
 
 def run_job(job_id: str) -> None:
-    """RQ entrypoint. Synchronous by necessity — RQ workers are not async."""
+    """RQ entrypoint. Synchronous by necessity — RQ workers are not async.
+
+    Storage comes from `get_storage`, the same selector the API uses, rather than constructing a
+    backend directly. The worker and the API must agree on where objects live: the API stores the
+    upload and reads the results, the worker does the opposite, so a worker hardcoded to S3 while
+    the API is on GCS would write assets nobody can find — with no error anywhere.
+    """
+    from app.api.deps import get_storage
     from app.core.jobstore import RedisJobStore
-    from app.storage.s3 import S3Storage
 
     settings = get_settings()
     asyncio.run(
-        run_job_async(job_id, S3Storage(settings), RedisJobStore(settings.redis_url), settings)
+        run_job_async(job_id, get_storage(settings), RedisJobStore(settings.redis_url), settings)
     )

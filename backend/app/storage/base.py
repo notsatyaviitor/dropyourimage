@@ -7,7 +7,7 @@ local filesystem, so there is no port to do later.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import BinaryIO, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -18,6 +18,19 @@ class StorageBackend(Protocol):
 
     def get(self, key: str) -> bytes:
         """Retrieve bytes. Raises `KeyError` if absent."""
+        ...
+
+    def put_stream(self, key: str, fileobj: BinaryIO, content_type: str) -> None:
+        """Store from an open file object, without loading it into memory.
+
+        Exists for the download bundle. `_write_bundle` assembles the zip through a temp file
+        precisely so a multi-gigabyte bundle is never a `bytes` object — and then handed it to
+        `put`, which took bytes, so the whole thing was read straight back in. Measured against
+        this session's real assets: a 200-image order at source resolution is ~45 GB of TIFFs plus
+        originals, i.e. a guaranteed OOM at the final step of an otherwise finished job.
+
+        Implementations must stream. `fileobj` is positioned at the start and is not closed here.
+        """
         ...
 
     def signed_url(self, key: str, ttl_seconds: int) -> str:

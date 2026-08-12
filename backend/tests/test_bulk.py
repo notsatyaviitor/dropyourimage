@@ -1056,6 +1056,39 @@ class TestSourceFormatOnly:
 
         assert zipfile.ZipFile(io.BytesIO(bundle.content)).namelist() == ["shot.png"]
 
+    async def test_the_bundle_is_uploaded_streamed_not_read_into_memory(self, client, monkeypatch):
+        """`_write_bundle` assembles through a temp file so a huge bundle is never a `bytes`
+        object; uploading it with `put(scratch.read())` threw that away at the last step.
+
+        Measured on this project's own assets: 200 images at source resolution is ~45 GB of TIFFs
+        plus returned originals — an OOM on a job that had already succeeded and been paid for.
+        """
+        from app.api.deps import get_storage
+
+        storage = get_storage()
+        used = {"stream": 0, "bytes": 0}
+        real_stream, real_put = storage.put_stream, storage.put
+
+        def spy_stream(key, fileobj, content_type):
+            if key.endswith("outputs.zip"):
+                used["stream"] += 1
+            return real_stream(key, fileobj, content_type)
+
+        def spy_put(key, data, content_type):
+            if key.endswith("outputs.zip"):
+                used["bytes"] += 1
+            return real_put(key, data, content_type)
+
+        monkeypatch.setattr(storage, "put_stream", spy_stream)
+        monkeypatch.setattr(storage, "put", spy_put)
+
+        r = await upload(client, batch(["a.png", "b.png"]))
+        status = (await client.get(f"/jobs/{r.json()['job_id']}")).json()
+
+        assert status["bundle_url"], "the bundle must still be produced"
+        assert used["stream"] == 1, "bundle must go through put_stream"
+        assert used["bytes"] == 0, "bundle must never be read into a bytes object"
+
     async def test_a_writable_source_does_not_get_a_duplicate_original(self, client):
         """PNG round-trips, so its 'original' would just be a second copy of the same format."""
         r = await upload(

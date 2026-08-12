@@ -1,0 +1,51 @@
+# DropYourImage API. Install to /etc/systemd/system/dyi-api.service
+#
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dyi-api
+#
+# Binds to 127.0.0.1 only: nginx terminates TLS and is the sole public entry point. Exposing
+# uvicorn directly would bypass the reverse proxy, and with it the upload size cap, the rate
+# limit and the auth gate — this application has none of those of its own.
+
+[Unit]
+Description=DropYourImage API (FastAPI/uvicorn)
+After=network-online.target redis-server.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=dyi
+Group=dyi
+
+# WorkingDirectory matters beyond tidiness: a relative GCP_KEY_FILE resolves against it, and this
+# unit and the worker unit must agree or one of them fails with what looks like a credentials
+# error. Use an absolute GCP_KEY_FILE and this stops being load-bearing.
+WorkingDirectory=/srv/dyi/backend
+EnvironmentFile=/srv/dyi/backend/.env
+
+ExecStart=/srv/dyi/backend/.venv/bin/python -m uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 2 --timeout-keep-alive 65
+
+# Restart on failure, but give up if it is crash-looping — a bad .env should be visible in
+# `systemctl status`, not hidden behind an endless restart.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Hardening. The process needs to read the venv and the key file and write nothing to disk except
+# temp files, so almost everything can be locked down.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/dyi/backend
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyi-api
+
+[Install]
+WantedBy=multi-user.target

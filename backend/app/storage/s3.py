@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import BinaryIO
+
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
@@ -33,6 +35,12 @@ class S3Storage:
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._client.put_object(
             Bucket=self._bucket, Key=key, Body=data, ContentType=content_type
+        )
+
+    def put_stream(self, key: str, fileobj: BinaryIO, content_type: str) -> None:
+        """Multipart upload from the file object — see StorageBackend.put_stream."""
+        self._client.upload_fileobj(
+            fileobj, self._bucket, key, ExtraArgs={"ContentType": content_type}
         )
 
     def get(self, key: str) -> bytes:

@@ -53,6 +53,13 @@ for _key in (
     "ADOBE_CLIENT_ID",
     "ADOBE_CLIENT_SECRET",
     "ADOBE_ORG_ID",
+    # Same reasoning as the vendor keys, for the same reason it is unconditional: a developer's
+    # .env now names a real GCS bucket, and a test that reached it would write objects into
+    # production storage and bill for them. Memory mode above already wins, so this is the second
+    # lock on the same door — deliberately, because the cost of it failing is silent.
+    "GCP_BUCKET_NAME",
+    "GCP_KEY_FILE",
+    "GCP_PROJECT_ID",
 ):
     os.environ[_key] = ""
 

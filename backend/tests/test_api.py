@@ -195,6 +195,41 @@ class TestObjectPassthrough:
         r = await client.get("/objects/jobs/nope/out/x.png")
         assert r.status_code == 404
 
+    async def test_it_serves_objects_in_memory_mode(self, client):
+        """The results grid and download links depend on this route when there is no S3/GCS."""
+        from app.api.deps import get_storage
+
+        get_storage().put("jobs/j1/out/a.png", b"PNGBYTES", "image/png")
+        r = await client.get("/objects/jobs/j1/out/a.png")
+
+        assert r.status_code == 200
+        assert r.content == b"PNGBYTES"
+
+    async def test_it_is_disabled_when_real_storage_is_configured(self, client):
+        """Verified against a live GCS bucket before this gate existed: the route returned HTTP
+        200 with the object body for any key, no signature and no expiry, defeating the
+        signed-URL model entirely. Keys cannot be the control — a job id is in every client URL
+        and every other key is derived from it by a documented rule."""
+        from app.api import routes
+        from app.api.deps import get_storage
+        from app.core.settings import Settings
+        from app.main import app
+
+        get_storage().put("jobs/j2/out/a.png", b"PNGBYTES", "image/png")
+        # Same in-memory bytes; only the *declared* backend changes, so this asserts the gate and
+        # not merely that a different store is empty.
+        app.dependency_overrides[routes._settings_dep] = lambda: Settings(
+            _env_file=None, s3_endpoint_url="https://s3.example", gcp_bucket_name=""
+        )
+        try:
+            r = await client.get("/objects/jobs/j2/out/a.png")
+        finally:
+            app.dependency_overrides.pop(routes._settings_dep, None)
+
+        assert r.status_code == 404
+        assert b"PNGBYTES" not in r.content
+        assert "disabled" not in r.text.lower(), "must not confirm the key exists"
+
 
 class TestPresetHash:
     async def test_identical_configs_share_a_config_hash(self, client):

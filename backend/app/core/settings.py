@@ -74,6 +74,41 @@ class Settings(BaseSettings):
     s3_secret_key: str = "minioadmin"
     signed_url_ttl_seconds: int = 900
 
+    # --- deployment ----------------------------------------------------------
+    #
+    # Comma-separated origins the browser may call this API from. Defaults to "*" so local
+    # development and the test suite are unchanged, but a real deployment must name its frontend
+    # origin: with no auth in the app itself, "*" means any page on the internet can drive an
+    # endpoint that spends money.
+    cors_allow_origins: str = "*"
+
+    # Rough peak RSS for ONE image at `max_image_pixels`, used only by the startup sizing check.
+    # Measured 4,435 MB for a real 50.6 MP DNG through the full Photoroom path (12 Aug 2026), so
+    # ~88 MB per megapixel; 80 MP therefore lands near 7 GB. A deliberate over-estimate: the cost
+    # of being wrong high is a warning to read, and of being wrong low is the OOM killer taking
+    # out a paid job at 90%.
+    memory_mb_per_megapixel: float = 88.0
+
+    # Refuse to start when WORKER_CONCURRENCY x per-image memory exceeds what the machine has.
+    # Set false on a box where the estimate does not apply (small images only, or a cgroup limit
+    # this cannot see) — it downgrades to a warning rather than being silently ignored.
+    enforce_memory_headroom: bool = True
+
+    # --- Google Cloud Storage (alternative to S3/MinIO) -----------------------
+    #
+    # Setting `gcp_bucket_name` selects GCS over S3; nothing else has to change, because both sit
+    # behind `StorageBackend` (app/storage/base.py). `S3_ENDPOINT_URL=memory` still wins over
+    # both, since that is the explicit local/test escape hatch — see app/api/deps.py.
+    #
+    # `gcp_key_file` is a path to a service-account JSON, never the JSON itself: a private key in
+    # an env var ends up in `docker inspect`, shell history and crash dumps. Left empty, the
+    # client falls back to Application Default Credentials, which is the right answer on GCE/GKE
+    # or Cloud Run where the instance already has an attached service account and no key file
+    # needs to exist at all.
+    gcp_project_id: str = ""
+    gcp_bucket_name: str = ""
+    gcp_key_file: str = ""
+
     # --- limits: security controls, not tuning knobs (see docs/SECURITY.md) ---
     #
     # These bound ONE uploaded archive. A bulk job arrives as several archives (see
@@ -145,7 +180,16 @@ class Settings(BaseSettings):
     # composite, so failing with the vendor's own error beats silently shipping a mask derived
     # from a thumbnail.
     vendor_min_long_edge_px: int = 1024
-    worker_concurrency: int = 8
+
+    # Parallel images within one job. **4, not the 8 this was**, because 8 was never safe at the
+    # resolutions this pipeline accepts: one 50.6 MP image peaked at 4,435 MB resident (measured
+    # 12 Aug 2026, real Photoroom path), so 8 implies ~35 GB in flight and the failure mode is the
+    # OOM killer taking out a job the vendor has already been paid for.
+    #
+    # 4 is still not universally safe — it is a starting point that fits a 32 GB machine. The
+    # startup check in `app/core/sizing.py` does the arithmetic against actual RAM and refuses,
+    # naming a value that fits, rather than leaving it to be discovered under load.
+    worker_concurrency: int = 4
 
     cache_cutouts: bool = True
     log_level: str = "INFO"
@@ -208,6 +252,18 @@ class Settings(BaseSettings):
         """Whether the PSD stage can use the Photoshop API, or must run the fallback."""
         return bool(self.adobe_client_id and self.adobe_client_secret and self.adobe_org_id)
 
+    @property
+    def storage_backend_name(self) -> str:
+        """Which backend `app.api.deps.get_storage` will pick, in the same order it picks it.
+
+        Kept here rather than in `deps` so `/health` and the startup banner can report it without
+        constructing a client — asking the selector would mean connecting to the bucket just to
+        answer a health check.
+        """
+        if self.s3_endpoint_url in ("", "memory"):
+            return "memory"
+        return "gcs" if self.gcp_bucket_name else "s3"
+
     def redacted(self) -> dict[str, object]:
         """Safe-to-log view. Used by the startup banner and the /health endpoint."""
         return {
@@ -219,6 +275,10 @@ class Settings(BaseSettings):
             "adobe_psd": self.adobe_configured,
             "upscaler": self.upscaler_enabled,
             "queue": self.queue_name,
+            # Which object store is actually live. Names only — never a bucket credential, a key
+            # file path or an endpoint. Worth publishing because "the assets went somewhere else"
+            # is otherwise invisible until a download 404s.
+            "storage": self.storage_backend_name,
             "cache_cutouts": self.cache_cutouts,
             # Published so the browser sizes its upload batches from the server's actual limits
             # rather than a hardcoded guess that drifts out of step with them. `bulk_enabled`

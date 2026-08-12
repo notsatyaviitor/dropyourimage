@@ -5,6 +5,17 @@
 *.pem
 *.key
 
+# Cloud service-account keys. A GCP key is a plain .json, so unlike .pem/.key nothing about the
+# extension marks it as secret — it looks exactly like config and gets committed by reflex.
+# `backend/*.json` is safe to blanket-ignore: every tracked .json in this repo lives in frontend/
+# (package.json, tsconfig*), and backend/ has none at its top level. The named patterns catch the
+# usual download names wherever they land. Prefer keeping the key outside the repo entirely.
+/*.json
+backend/*.json
+*service-account*.json
+*-key.json
+gcp-*.json
+
 # --- Python / backend ---
 .venv/
 venv/

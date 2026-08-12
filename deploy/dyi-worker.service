@@ -1,0 +1,55 @@
+# DropYourImage RQ worker. Install to /etc/systemd/system/dyi-worker.service
+#
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dyi-worker
+#
+# WITHOUT THIS RUNNING, JOBS SIT `queued` FOREVER. The API enqueues and returns 202 immediately,
+# so a missing worker looks like a healthy API and a hung UI. `/health` reports
+# `limits.bulk_enabled` — false there means the queue is not usable.
+#
+# The queue name must match QUEUE_NAME in .env (default `dyi`). A bare `rq worker` listens on
+# `default` and sits idle next to a full `dyi` queue.
+
+[Unit]
+Description=DropYourImage RQ worker
+After=network-online.target redis-server.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=dyi
+Group=dyi
+
+# Must match dyi-api.service: both resolve a relative GCP_KEY_FILE against this, and the API and
+# worker have to agree on where object storage is or the worker writes assets the API cannot find.
+WorkingDirectory=/srv/dyi/backend
+EnvironmentFile=/srv/dyi/backend/.env
+
+# One worker process. Concurrency WITHIN a job is WORKER_CONCURRENCY (asyncio, in-process); adding
+# `rq` processes multiplies memory by that factor again. At ~4.4 GB per 50 MP image, two worker
+# processes at WORKER_CONCURRENCY=4 is ~35 GB, which is the OOM this codebase already measured.
+# Scale by adding machines, not by adding workers here.
+ExecStart=/srv/dyi/backend/.venv/bin/rq worker dyi
+
+# SIGTERM lets RQ finish the image in flight rather than abandoning a job the vendor was paid for.
+# 20 minutes covers one large image plus the bundle write; past that, systemd kills it.
+KillSignal=SIGTERM
+TimeoutStopSec=1200
+
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/dyi/backend
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyi-worker
+
+[Install]
+WantedBy=multi-user.target

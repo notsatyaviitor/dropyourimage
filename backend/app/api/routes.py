@@ -253,9 +253,33 @@ def get_job_images(
 
 
 @router.get("/objects/{object_key:path}")
-def get_object(object_key: str, storage: StorageBackend = Depends(get_storage)) -> Response:
-    """Passthrough for memory-mode storage. Real S3 uses presigned URLs directly and never
-    reaches this route — see `MemoryStorage.signed_url` vs `S3Storage.signed_url`."""
+def get_object(
+    object_key: str,
+    storage: StorageBackend = Depends(get_storage),
+    settings: Settings = Depends(_settings_dep),
+) -> Response:
+    """Passthrough for memory-mode storage only.
+
+    **Gated deliberately.** This used to serve from whatever backend was configured, on the
+    assumption — stated in this docstring, enforced nowhere — that a real deployment would only
+    ever follow presigned URLs. It does not work that way: the route stayed reachable, so
+    `GET /objects/jobs/<id>/out/x.png` returned any object in the live bucket with no signature,
+    no expiry and no auth, defeating the entire signed-URL model that `docs/SECURITY.md` relies on
+    (verified against a real GCS bucket: HTTP 200 with the object body).
+
+    Keys are not secret enough to be the control. A job id appears in every client URL, and every
+    other key is derived from it by a documented rule (`job_key`, `output_key`, `source_key`), so
+    one leaked id would expose that job's uploads and outputs permanently.
+
+    In S3/GCS mode the API hands out short-lived signed URLs instead, which is the only intended
+    way an asset leaves storage.
+    """
+    if settings.storage_backend_name != "memory":
+        raise HTTPException(
+            status_code=404,
+            detail="Not found.",  # deliberately not "disabled": do not confirm the key exists
+        )
+
     try:
         data = storage.get(object_key)
     except KeyError:

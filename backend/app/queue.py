@@ -21,15 +21,35 @@ from app.core.settings import Settings, get_settings
 _CONNECT_TIMEOUT_SECONDS = 1.0
 
 
-@lru_cache
 def get_queue(settings: Settings | None = None) -> Queue:
+    """The RQ queue, cached per (url, queue name).
+
+    **Not `@lru_cache`d on `settings`.** `Settings` is a pydantic model and therefore unhashable,
+    so every call that passed one raised `TypeError: unhashable type: 'Settings'` before it ever
+    reached Redis. `queue_available` catches broad `Exception` to mean "Redis is unreachable", so
+    that TypeError was silently reported as a down queue: `bulk_enabled` stayed false on a healthy
+    Redis, every job fell back to running inline, an `rq worker` sat idle forever, and any order
+    over `INLINE_JOB_MAX_IMAGES` was refused outright. The whole async path was dead.
+
+    Nothing caught it because the suite runs with `REDIS_URL=memory`, which short-circuits in
+    `queue_available` before this function is called — the bug only existed on the real
+    configuration. `test_queue_wiring.py` now calls this the way the app does.
+
+    Caching on primitives is the same shape as `app/api/deps.py::_cached_s3_storage`, and for the
+    same reason: keep the connection pool per configuration, key it on something hashable.
+    """
     settings = settings or get_settings()
+    return _cached_queue(settings.redis_url, settings.queue_name)
+
+
+@lru_cache
+def _cached_queue(redis_url: str, queue_name: str) -> Queue:
     connection = Redis.from_url(
-        settings.redis_url,
+        redis_url,
         socket_connect_timeout=_CONNECT_TIMEOUT_SECONDS,
         socket_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
-    return Queue(name=settings.queue_name, connection=connection)
+    return Queue(name=queue_name, connection=connection)
 
 
 # Reachability is cached briefly: a healthy ping is sub-millisecond, but an unreachable Redis costs
