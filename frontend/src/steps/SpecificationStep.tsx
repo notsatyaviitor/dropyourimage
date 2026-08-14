@@ -38,7 +38,6 @@ import type {
   BackgroundSpec,
   CentringSpec,
   CutoutSpec,
-  EngineId,
   ExportSpec,
   JobConfig,
   OutputFormat,
@@ -254,77 +253,16 @@ export function SpecificationStep({
                 </p>
               )}
 
-              <Advanced>
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={cutout.multi_object}
-                  onChange={(e) => setCutout({ multi_object: e.target.checked })}
-                />
-                Layer every object separately (scenes, not packshots)
-              </label>
-              {explain && (
-                <p className="opt-help">
-                  For a room or lifestyle shot: a model lists the objects and each is cut out into
-                  its own named PSD layer with its own saved path — bed, pillows, plant, and so on.
-                  Leave off for a single product.
-                </p>
-              )}
+              {/* No Advanced panel on this card. Everything it used to hold is pinned to its
+                  DEFAULT_JOB_CONFIG value (api/types.ts), and the backend still accepts all of
+                  these fields, so an existing saved config setting them keeps working:
 
-              <p className="opt-sublabel">Engine strategy</p>
-              <select
-                className="opt-input opt-select"
-                value={cutout.strategy}
-                onChange={(e) =>
-                  setCutout({
-                    strategy: e.target.value as CutoutSpec['strategy'],
-                    engine: e.target.value === 'single' ? (cutout.engine ?? 'photoroom') : null,
-                  })
-                }
-              >
-                <option value="auto">Auto — compare two engines, keep the better cut-out</option>
-                <option value="single">Single engine</option>
-              </select>
-
-              {cutout.strategy === 'single' && (
-                <>
-                  <p className="opt-sublabel">Engine</p>
-                  <select
-                    className="opt-input opt-select"
-                    value={cutout.engine ?? 'photoroom'}
-                    onChange={(e) => setCutout({ engine: e.target.value as EngineId })}
-                  >
-                    {/* remove.bg is deliberately absent: retired on accuracy 7 Aug 2026. The
-                        backend adapter still exists, so an old saved config naming it keeps
-                        working — it is just not offered as a new choice. */}
-                    <option value="photoroom">Photoroom — soft edge preserved</option>
-                    <option value="gemini">Gemini — hard edge, no soft alpha</option>
-                    <option value="falai">fal.ai</option>
-                    <option value="local">Local (offline control engine — demo quality only)</option>
-                  </select>
-
-                  {/* Stated at the point of choosing, not only after the job runs. The same fact
-                      comes back per-image as the HARD_EDGED_MASK note. */}
-                  {cutout.engine === 'gemini' && (
-                    <p className="opt-note opt-note-warn">
-                      Gemini returns the mask as a polygon, so the cut-out edge is hard — measured
-                      at 0 soft edge pixels against 248 for the same reference image. Edge
-                      decontamination has nothing to correct, so expect a visible halo against
-                      saturated background colours. Choose Photoroom for soft-edged subjects.
-                    </p>
-                  )}
-                </>
-              )}
-
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={cutout.keep_losing_candidate}
-                  onChange={(e) => setCutout({ keep_losing_candidate: e.target.checked })}
-                />
-                Keep the losing candidate for side-by-side review
-              </label>
-              </Advanced>
+                  strategy 'auto'          — both engines compared, better cut-out kept. Picking one
+                                             by hand could only do worse than the per-image score.
+                  keep_losing_candidate    — must stay on: the losing candidate has to be viewable
+                                             side by side (see frontend/CLAUDE.md).
+                  multi_object false       — a scenes feature that costs one segmentation call PER
+                                             object, and this POC is packshots. */}
             </ServiceRow>
 
             {/* ── Background ─────────────────────────────────────── */}
@@ -595,30 +533,10 @@ export function SpecificationStep({
                 onChange={(e) => setSize({ margin_pct: Number(e.target.value) })}
               />
 
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={size.allow_upscale}
-                  onChange={(e) => setSize({ allow_upscale: e.target.checked })}
-                />
-                Allow enlarging a source smaller than the canvas
-              </label>
-              {explain && (
-                <p className="opt-help">
-                  Off by default: an undersized master is padded rather than stretched, and the
-                  result says which happened.
-                </p>
-              )}
-
-              <p className="opt-sublabel">Colour profile</p>
-              <select
-                className="opt-input opt-select"
-                value={exportSpec.profile}
-                onChange={(e) => setExport({ profile: e.target.value as ExportSpec['profile'] })}
-              >
-                <option value="srgb">sRGB</option>
-                <option value="adobe_rgb">Adobe RGB (1998)</option>
-              </select>
+              {/* allow_upscale stays false and profile stays 'srgb' — both DEFAULT_JOB_CONFIG
+                  values. An undersized master is padded rather than stretched (and the result
+                  says which happened), and sRGB is the correct profile for every delivery
+                  target in this demo. */}
               </Advanced>
             </ServiceRow>
 
@@ -630,14 +548,27 @@ export function SpecificationStep({
               detail="Centre the subject within the output canvas. Deterministic measurement from the alpha channel — no model involved."
               alwaysOn
             >
+              {/* The frame takes the aspect ratio of the canvas it depicts, so picking the
+                  1200 × 628 banner preset visibly widens it. It used to be hard-coded square
+                  while the caption underneath claimed whatever size was selected. */}
               <div className="centre-preview">
-                <div className="centre-preview-frame">
+                <div
+                  className="centre-preview-frame"
+                  style={{
+                    aspectRatio: size.match_source ? '1 / 1' : `${size.width} / ${size.height}`,
+                  }}
+                >
                   <div className="centre-preview-guide centre-guide-h" />
                   <div className="centre-preview-guide centre-guide-v" />
                   <div className="centre-preview-subject" />
                 </div>
                 <span className="centre-preview-label">
-                  Subject centred on {size.width} × {size.height} canvas
+                  {/* Non-breaking spaces around the ×: the caption wraps onto two lines in this
+                      narrow column, and "1200 ×" / "628 canvas" split across them reads as two
+                      different numbers. */}
+                  {size.match_source
+                    ? 'Subject centred on each image’s own canvas'
+                    : `Subject centred on ${size.width} × ${size.height} canvas`}
                 </span>
               </div>
 
@@ -671,31 +602,10 @@ export function SpecificationStep({
                 </p>
               )}
 
-              <label className="opt-check">
-                <input
-                  type="checkbox"
-                  checked={centring.include_shadow_in_bounds}
-                  onChange={(e) => setCentring({ include_shadow_in_bounds: e.target.checked })}
-                />
-                Count a preserved shadow toward the subject bounds
-              </label>
-
-              <p className="opt-sublabel">Alpha threshold — {centring.alpha_threshold.toFixed(2)}</p>
-              <input
-                type="range"
-                className="opt-range"
-                min={0}
-                max={0.5}
-                step={0.01}
-                value={centring.alpha_threshold}
-                onChange={(e) => setCentring({ alpha_threshold: Number(e.target.value) })}
-              />
-              {explain && (
-                <p className="opt-help">
-                  Which pixels count when measuring the subject&rsquo;s bounds. Measurement only —
-                  the stored alpha is never thresholded.
-                </p>
-              )}
+              {/* include_shadow_in_bounds and alpha_threshold keep their DEFAULT_JOB_CONFIG
+                  values. The threshold decides which pixels count when measuring the subject's
+                  bounds — measurement only, the stored alpha is never thresholded — so a hand-set
+                  value shifts the centring with nothing on screen to explain why. */}
               </Advanced>
             </ServiceRow>
 

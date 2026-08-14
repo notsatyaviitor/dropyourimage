@@ -396,9 +396,13 @@
   display: flex; align-items: center; justify-content: center; margin-top: 1px;
 }
 .srow-icon svg { width: 18px; height: 18px; }
-.srow-icon-bg     { background: rgba(44,188,99,.1);  color: var(--green-btn); }
-.srow-icon-size   { background: rgba(21,35,57,.08);  color: var(--navy); }
-.srow-icon-centre { background: rgba(2,58,81,.09);   color: var(--link); }
+/* One accent for every section icon. These used to be three different colours (green, navy,
+   link-blue), which read as though the sections were categorised — they are not, they are
+   stages of a single pipeline. Kept as separate selectors because the TSX passes an
+   `iconClass` per row; they simply resolve to the same green now. */
+.srow-icon-bg,
+.srow-icon-size,
+.srow-icon-centre { background: rgba(44,188,99,.1); color: var(--green-btn); }
 
 /* ── Option sub-label ─── */
 .opt-sublabel {
@@ -447,15 +451,19 @@
 /* ── Centre preview diagram ─── */
 .centre-preview {
   /* No top border or margin: the card body now owns spacing between groups, and a second rule
-     here stacked directly under the header's. */
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 14px; background: var(--card-bg);
+     here stacked directly under the header's.
+     `inline-flex` so the panel hugs its contents and sits at the left, in line with every other
+     control in this column. Stretched to the full column width it was a ~1270px bordered box
+     with a 116px square adrift in the middle of it. */
+  display: inline-flex; align-items: center; gap: 16px;
+  padding: 14px 18px; background: var(--card-bg);
   border: 1px solid var(--border); border-radius: 8px;
+  max-width: 100%;
 }
 .centre-preview-frame {
-  /* A square canvas, because that is what it depicts. At 220x80 it read as a wide empty panel
-     rather than a preview of a 500x500 output. */
-  width: 116px; height: 116px;
+  /* Height is fixed and the width follows the `aspect-ratio` set inline from the chosen output
+     size, so the frame actually depicts the canvas the caption names. */
+  height: 104px; width: auto; max-width: 210px; flex-shrink: 0;
   border: 1.5px dashed var(--light); border-radius: 6px;
   background: var(--content-bg); position: relative;
   display: flex; align-items: center; justify-content: center;
@@ -465,13 +473,15 @@
 }
 .centre-guide-h { width: 100%; height: 1px; top: 50%; left: 0; }
 .centre-guide-v { width: 1px; height: 100%; left: 50%; top: 0; }
+/* Sized off the frame's height rather than in fixed px, so it stays a plausible portrait
+   product whether the frame is square or the wide banner ratio. */
 .centre-preview-subject {
-  width: 40px; height: 58px; border-radius: 4px;
+  height: 56%; aspect-ratio: 40 / 58; border-radius: 4px;
   background: var(--navy); opacity: .28; position: relative; z-index: 1;
 }
 .centre-preview-label {
-  font-family: Manrope, sans-serif; font-size: 10.5px; font-weight: 600;
-  color: var(--muted); letter-spacing: .04em;
+  font-family: Manrope, sans-serif; font-size: 11px; font-weight: 600;
+  color: var(--muted); letter-spacing: .04em; line-height: 1.5; max-width: 170px;
 }
 
 .spec-add-btn {
@@ -548,7 +558,16 @@
 .sftp-field input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(44,188,99,.15); }
 
 /* ── Upload step ────────────────────────────────── */
-.upload-layout { display: grid; grid-template-columns: 1fr 340px; gap: 28px; align-items: start; }
+/* `minmax(0, 1fr)`, never a bare `1fr` — do not "simplify" this back.
+   `1fr` means `minmax(auto, 1fr)`, and that `auto` minimum resolves to the track's min-content
+   width. A file with a long unbroken name gives `.file-name` (white-space: nowrap) a min-content
+   width of the whole string, which propagates up through .file-item / .file-list / .upload-files-box
+   and grows this track to thousands of pixels — the DETAILS panel goes off-screen and the whole
+   document scrolls sideways. `min-width: 0` on `.file-info` does not help: it is a lower bound that
+   permits flex shrinking, it does not reduce the min-content contribution. An explicit 0 floor here
+   is what lets the row shrink and the ellipsis on `.file-name` actually render.
+   Same idiom as `.service-row` above. */
+.upload-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 28px; align-items: start; }
 
 .upload-dropzone {
   border: 2px dashed var(--border); border-radius: 14px; padding: 64px 40px; text-align: center;
@@ -635,7 +654,10 @@
 .detail-row:last-child { border-bottom: none; }
 .detail-key { color: var(--muted); flex-shrink: 0; font-size: 13px; }
 .detail-val { color: var(--text); text-align: right; font-weight: 600; font-size: 13px; }
-.detail-divider { height: 1px; background: var(--border); margin: 6px 0; }
+/* A group separator, not a rule of its own. The `.detail-row` above it already draws a
+   1px border-bottom, so painting a background here too rendered two parallel lines 6px
+   apart. Pure vertical space now; 13px keeps the original 6 + 1 + 6 spacing. */
+.detail-divider { height: 13px; }
 
 /* ── Complete step ──────────────────────────────── */
 .complete-wrap { width: 100%; }
@@ -1128,7 +1150,9 @@
 }
 .opt-radio input { accent-color: var(--green); }
 
-.preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
+/* margin-top matches `.opt-check` above it — the presets sat flush against the
+   "Keep the original resolution" checkbox and read as part of that control. */
+.preset-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
 .preset-btn {
   padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border);
   background: #fff; font-size: 11.5px; font-weight: 600; color: var(--muted); cursor: pointer;
@@ -1160,6 +1184,9 @@
   margin-top: 12px; padding: 10px 12px; border-radius: 6px;
   background: #fdf0ef; border: 1px solid #f0c4c0;
   font-size: 12.5px; color: #a5352b; line-height: 1.5;
+  /* The over-size warning prints raw filenames. A long one has no break opportunity, so without
+     this it sets a huge min-content width and widens the grid track it sits in. */
+  overflow-wrap: anywhere;
 }
 .details-note {
   margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);

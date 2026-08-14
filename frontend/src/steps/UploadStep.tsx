@@ -499,7 +499,9 @@ function SampleRow({
         <span className="file-thumb-ext">{ext}</span>
       </div>
       <div className="file-info">
-        <div className="file-name">{sample.name}</div>
+        {/* `title` because the name truncates: two exports sharing a long prefix are otherwise
+            indistinguishable in the list. Same on FileRow. */}
+        <div className="file-name" title={sample.name}>{sample.name}</div>
         <div className="file-size">{formatBytes(sample.size_bytes)}</div>
       </div>
       <div className="file-status file-status-ready">Ready</div>
@@ -544,7 +546,7 @@ function FileRow({
         </div>
       )}
       <div className="file-info">
-        <div className="file-name">{file.file.name}</div>
+        <div className="file-name" title={file.file.name}>{file.file.name}</div>
         <div className="file-size">{formatBytes(file.file.size)}</div>
       </div>
       <div className={`file-status file-status-${status}`}>

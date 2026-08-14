@@ -433,7 +433,7 @@ function BeforeAfterCard({
           )}
         </div>
       </div>
-      <div className="ba-card-name">{result.source_name}</div>
+      <div className="ba-card-name" title={result.source_name}>{result.source_name}</div>
     </div>
   )
 }
