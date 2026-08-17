@@ -33,7 +33,8 @@ The UI follows the platform's own order flow, ported from the design prototype i
 **Specification → Upload method → Upload → Complete**.
 
 Step 1 is a specification card built from *service rows*, reusing the client's own service
-vocabulary: **Clipping**, **Background Services**, **Output Size**, **Auto-Centre**, **Layered PSD**.
+vocabulary: **Background Removal**, **Background Colour**, **Output Size**, **Auto-Centre**,
+**Layered PSD**.
 Each row expands to the controls for that stage. Every `JobConfig` field is reachable — the prototype
 showed only three services, and the omitted ones are not cosmetic: without `cutout.subject_prompt`, a
 photograph containing several objects silently yields a cut-out of the wrong one.

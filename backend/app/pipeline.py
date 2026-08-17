@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from dataclasses import dataclass
 
@@ -56,6 +57,11 @@ _DECONTAM_MIN_UNIFORMITY = 0.25
 # which together is the signature of "we cut out the wrong object in a furnished room".
 _SCENE_MAX_UNIFORMITY = 0.05
 _SCENE_MAX_SCORE = 0.60
+
+# Automatic subject detection degrades silently by design — whole-frame is the right answer for a
+# packshot, so it cannot be a per-image warning. That makes it undiagnosable without a log line:
+# "detection did nothing" and "detection was never attempted" look identical from the outside.
+logger = logging.getLogger(__name__)
 
 
 async def process_image(
@@ -98,10 +104,11 @@ async def process_image(
                 result, image_bytes, decoded, config, settings, engines, cache, formats, size
             )
 
-        alpha, notes, candidates, cost, chosen, cache_hit = await _stage1_cutout(
+        alpha, notes, candidates, cost, chosen, cache_hit, subject_label = await _stage1_cutout(
             image_bytes, decoded, config, settings, engines, cache, source_format
         )
         result.cache_hit = cache_hit
+        result.subject_label = subject_label
         result.notes.extend(notes)
         result.candidates = candidates
         result.cost_usd = cost
@@ -283,7 +290,7 @@ async def _stage1_cutout(
     width, height = decoded.source_size
 
     if decoded.alpha is not None and float(decoded.alpha.min()) < 0.999:
-        return decoded.alpha, [], [], 0.0, None, False
+        return decoded.alpha, [], [], 0.0, None, False, None
 
     pool = engines if engines is not None else registry.select_pool(settings, config.cutout)
     store = cache if (cache is not None and settings.cache_cutouts) else NullCutoutCache()
@@ -309,7 +316,9 @@ async def _stage1_cutout(
 
     # Multi-object scenes: isolate the requested subject *before* segmenting, so the engine is
     # asked an answerable question. See app/engines/locate.py.
-    roi, locate_notes = await _locate_subject(vendor_bytes, decoded, config, settings)
+    roi, locate_notes, subject_label = await _locate_subject(
+        vendor_bytes, decoded, config, settings
+    )
     locate_notes = list(locate_notes) + vendor_notes
     if roi is not None:
         results, failures = await _run_pool_on_roi(
@@ -336,7 +345,7 @@ async def _stage1_cutout(
     cache_hit = all(r.cache_hit for r in results)
 
     if verdict.winner is None:
-        return None, verdict.notes, verdict.candidates, cost, None, cache_hit
+        return None, verdict.notes, verdict.candidates, cost, None, cache_hit, subject_label
 
     if autopick.needs_vision_tiebreak(verdict):
         verdict, tiebreak_cost = await _vision_tiebreak(decoded, results, verdict, settings)
@@ -355,6 +364,7 @@ async def _stage1_cutout(
         cost,
         verdict.winner.engine,
         cache_hit,
+        subject_label,
     )
 
 
@@ -444,7 +454,7 @@ async def _locate_subject(
     decoded: E.DecodedImage,
     config: JobConfig,
     settings: Settings,
-) -> tuple[G.BBox | None, list[Note]]:
+) -> tuple[G.BBox | None, list[Note], str | None]:
     """Resolve `cutout.subject_prompt` to a region of interest.
 
     Returns ``(None, notes)`` when no prompt was given — the packshot path, unchanged — or when the
@@ -456,22 +466,78 @@ async def _locate_subject(
     from app.engines.locate import GeminiLocator, SubjectNotLocated
 
     phrase = config.cutout.subject_prompt
-    if not phrase:
-        return None, []
-
     width, height = decoded.source_size
     locator = GeminiLocator(settings)
+
+    if not phrase:
+        # No named subject. Either segment whole-frame as before, or detect one automatically.
+        if not settings.auto_subject_enabled:
+            return None, [], None
+        return await _auto_locate_subject(image_bytes, locator, config, width, height)
+
     try:
         located = await locator.locate(
             image_bytes, phrase, width, height, padding_pct=config.cutout.subject_padding_pct
         )
     except SubjectNotLocated:
-        return None, [Note.SUBJECT_NOT_FOUND]
+        return None, [Note.SUBJECT_NOT_FOUND], None
     except Exception:
         # Broad on purpose: localisation is advisory, and must not add a way for an image to fail.
-        return None, [Note.SUBJECT_NOT_FOUND]
+        return None, [Note.SUBJECT_NOT_FOUND], None
 
-    return located.box, [Note.SUBJECT_LOCATED]
+    # No label on this path: the user named the subject, so echoing their own words back as a
+    # "detected" label would dress an instruction up as a finding.
+    return located.box, [Note.SUBJECT_LOCATED], None
+
+
+async def _auto_locate_subject(
+    image_bytes: bytes,
+    locator,
+    config: JobConfig,
+    width: int,
+    height: int,
+) -> tuple[G.BBox | None, list[Note], str | None]:
+    """Detect a subject with no prompt: enumerate the objects, then pick the dominant one.
+
+    Uses `GeminiLocator.detect`, which is `locate` with the phrase discovered instead of typed —
+    same request, schema, parser and padding. That sharing is the point: measured against a real
+    packshot, the named-subject path produced a correct tight crop while an enumerate-and-rank
+    approach returned nothing at all, so the auto path runs on the machinery already known to
+    work. Six calls at temperature 0 returned the identical box, so it is reproducible in practice
+    even though the choice now sits with the model.
+
+    The model's box is still checked by our own arithmetic before it is trusted.
+
+    Every failure returns ``(None, [])`` and falls back to the unchanged whole-frame path. That is
+    the *right* answer for a packshot, so a failure here is not an error and must not be reported
+    as one: one product on a sweep needs no crop, and whole-frame segmentation already had it.
+    """
+    from app.engines.locate import SubjectNotLocated, box_is_plausible_subject
+
+    try:
+        located = await locator.detect(
+            image_bytes, width, height, padding_pct=config.cutout.subject_padding_pct
+        )
+    except SubjectNotLocated as exc:
+        # The ordinary "this is a packshot, there is nothing to crop to" answer as well as a
+        # vendor failure. Logged rather than noted: whole-frame is the *correct* result for a
+        # single product on a sweep, so surfacing it as a warning would cry wolf on most images.
+        logger.info("auto subject detection found nothing: %s", exc)
+        return None, [], None
+    except Exception:
+        # Broad on purpose, exactly as the prompted path is: automatic localisation is advisory
+        # and must not add a way for an image to fail.
+        logger.warning("auto subject detection failed", exc_info=True)
+        return None, [], None
+
+    # The model's box, checked by our own arithmetic before it is trusted. A box covering the
+    # whole frame is the model boxing the scene rather than a product in it, and cropping to that
+    # disables a whole-frame path that was already correct.
+    if not box_is_plausible_subject(located.raw_box, width, height):
+        logger.info("auto subject box rejected as implausible: %s", located.raw_box)
+        return None, [], None
+
+    return located.box, [Note.SUBJECT_AUTO_DETECTED], located.label or None
 
 
 async def _run_pool_on_roi(

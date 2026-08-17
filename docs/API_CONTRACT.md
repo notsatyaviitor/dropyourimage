@@ -103,7 +103,7 @@ signed URLs for that page only.
 ```
 JobConfig
 ├── cutout      CutoutSpec       Tab 1 "Clipping"           — the only AI stage
-├── background  BackgroundSpec   Tab 2 "Background Services"
+├── background  BackgroundSpec   Tab 2 "Background Colour"
 ├── size        SizeSpec         Tab 3 "Size"
 ├── centring    CentringSpec     Tab 4 "Centring"
 ├── psd         PsdSpec          Tab 5 "PSD"

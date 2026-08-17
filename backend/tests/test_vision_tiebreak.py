@@ -47,6 +47,10 @@ def settings(**kw) -> Settings:
         _env_file=None,
         gemini_api_key="test-key",
         gemini_tiebreak_enabled=True,
+        # Off here on purpose. These tests are about the tie-break, and automatic subject
+        # detection also calls Gemini — left on, it consumes the mocked responses meant for the
+        # tie-break and the assertions start measuring the wrong call.
+        auto_subject_enabled=False,
         photoroom_api_key="",
         removebg_api_key="",
         fal_key="",

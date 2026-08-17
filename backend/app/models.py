@@ -49,6 +49,10 @@ class EngineId(str, Enum):
     FALAI = "falai"
     GEMINI = "gemini"
     LOCAL = "local"
+    # Self-hosted BiRefNet — the same model family fal.ai serves, run in-process instead of
+    # metered. Note this is the one engine that is NOT an API call, so the root CLAUDE.md's
+    # "everything AI is a metered API call" no longer holds once it is enabled.
+    BIREFNET = "birefnet"
 
 
 class EngineStrategy(str, Enum):
@@ -258,6 +262,20 @@ class Note(str, Enum):
     the binary core, so the kept object keeps its full transition band (invariant 2).
     """
 
+    SUBJECT_AUTO_DETECTED = "subject_auto_detected"
+    """No subject was named, so one was detected and cropped to automatically.
+
+    A model was asked to find the product and return one box — `locate.GeminiLocator.detect`,
+    which shares its request, schema, parser and padding with the named-subject path so the two
+    cannot drift. Our own arithmetic then checks the box is a plausible subject rather than the
+    whole scene. `ImageResult.subject_label` names what it settled on.
+
+    **This is a guess about intent, and the UI must say so.** Perception can find the product;
+    nothing in the pixels says which item the order was for when several are shown.
+    `cutout.subject_prompt` states it exactly and always beats this. Turn the behaviour off with
+    `AUTO_SUBJECT_ENABLED=false`.
+    """
+
     MULTI_OBJECT = "multi_object"
     """The scene was split into one PSD layer per object rather than a single cut-out.
 
@@ -384,7 +402,7 @@ class CutoutSpec(StrictModel):
 
 
 # ---------------------------------------------------------------------------
-# Tab 2 — Background Services
+# Tab 2 — Background Colour (named "Background Services" until 14 Aug 2026)
 # ---------------------------------------------------------------------------
 
 
@@ -696,6 +714,15 @@ class ImageResult(StrictModel):
         description="0-1; drives the shadow gate. Low means a busy original background.",
     )
     source_size: tuple[int, int] | None = None
+    subject_label: str | None = Field(
+        default=None,
+        description=(
+            "What the subject was taken to be, when it was not named in the config. Set with "
+            "`subject_auto_detected`; null on the whole-frame path and when `subject_prompt` "
+            "named it. Exists so the UI can report the guess as a guess — 'cropped to the "
+            "bottle' is checkable by a human, 'a subject was detected' is not."
+        ),
+    )
     preview_format: OutputFormat | None = Field(
         default=None,
         description=(

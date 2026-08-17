@@ -38,6 +38,7 @@ import type {
   BackgroundSpec,
   CentringSpec,
   CutoutSpec,
+  EngineId,
   ExportSpec,
   JobConfig,
   OutputFormat,
@@ -253,23 +254,93 @@ export function SpecificationStep({
                 </p>
               )}
 
-              {/* No Advanced panel on this card. Everything it used to hold is pinned to its
-                  DEFAULT_JOB_CONFIG value (api/types.ts), and the backend still accepts all of
-                  these fields, so an existing saved config setting them keeps working:
+              {/* Engine choice is on the main card, not behind Advanced: comparing engines is
+                  something this build is actively used for, and an option you reach for every
+                  session does not belong behind a disclosure. */}
+              <p className="opt-sublabel">Engine strategy</p>
+              <select
+                className="opt-input opt-select"
+                value={cutout.strategy}
+                onChange={(e) =>
+                  setCutout({
+                    // `engine` is required when strategy is 'single' and must be null otherwise —
+                    // models.py rejects the other combinations, so both sides are set together
+                    // here rather than left to a second interaction.
+                    strategy: e.target.value as CutoutSpec['strategy'],
+                    engine: e.target.value === 'single' ? (cutout.engine ?? 'photoroom') : null,
+                  })
+                }
+              >
+                <option value="auto">Auto — compare two engines, keep the better cut-out</option>
+                <option value="single">Single engine</option>
+              </select>
+              {explain && cutout.strategy === 'auto' && (
+                <p className="opt-help">
+                  Auto runs the first two <em>configured</em> engines from the server&rsquo;s pool and
+                  keeps the better cut-out. With only one key reachable it quietly becomes a single
+                  engine and says so on the result.
+                </p>
+              )}
 
-                  strategy 'auto'          — both engines compared, better cut-out kept. Picking one
-                                             by hand could only do worse than the per-image score.
-                  keep_losing_candidate    — must stay on: the losing candidate has to be viewable
-                                             side by side (see frontend/CLAUDE.md).
-                  multi_object false       — a scenes feature that costs one segmentation call PER
-                                             object, and this POC is packshots. */}
+              {cutout.strategy === 'single' && (
+                <>
+                  <p className="opt-sublabel">Engine</p>
+                  <select
+                    className="opt-input opt-select"
+                    value={cutout.engine ?? 'photoroom'}
+                    onChange={(e) => setCutout({ engine: e.target.value as EngineId })}
+                  >
+                    {/* remove.bg is deliberately absent: retired on accuracy 7 Aug 2026. The
+                        backend adapter still exists, so an old saved config naming it keeps
+                        working — it is just not offered as a new choice. */}
+                    <option value="photoroom">Photoroom — soft edge preserved</option>
+                    <option value="gemini">Gemini — hard edge, no soft alpha</option>
+                    <option value="falai">fal.ai — BiRefNet, hosted</option>
+                    <option value="birefnet">BiRefNet — self-hosted, no per-image cost</option>
+                    <option value="local">Local (offline control engine — demo quality only)</option>
+                  </select>
+
+                  {/* Stated at the point of choosing, not only after the job runs. The same fact
+                      comes back per-image as the HARD_EDGED_MASK note. */}
+                  {cutout.engine === 'gemini' && (
+                    <p className="opt-note opt-note-warn">
+                      Gemini returns the mask as a polygon, so the cut-out edge is hard — measured
+                      at 0 soft edge pixels against 248 for the same reference image. Edge
+                      decontamination has nothing to correct, so expect a visible halo against
+                      saturated background colours. Choose Photoroom for soft-edged subjects.
+                    </p>
+                  )}
+                  {cutout.engine === 'birefnet' && (
+                    <p className="opt-note opt-note-warn">
+                      Self-hosted: no key and no per-image cost, and the photograph never leaves
+                      the server. It needs the model installed on the server, and without a GPU it
+                      runs in seconds per image rather than Photoroom&rsquo;s ~0.8 s — noticeable
+                      on a large order.
+                    </p>
+                  )}
+                  {cutout.engine === 'local' && (
+                    <p className="opt-note opt-note-warn">
+                      The local engine is an offline control, not a production cut-out. It needs no
+                      key and costs nothing, which makes it useful as a free baseline — but it is
+                      known to fail on white-on-white and can confuse a black product with its own
+                      shadow. Do not judge output quality from it.
+                    </p>
+                  )}
+                </>
+              )}
+
+              {/* Still pinned, and deliberately not offered here:
+                  keep_losing_candidate — must stay on, the losing candidate has to be viewable
+                                          side by side (see frontend/CLAUDE.md).
+                  multi_object false    — a scenes feature that bills one segmentation call PER
+                                          object, and this POC is packshots. */}
             </ServiceRow>
 
             {/* ── Background ─────────────────────────────────────── */}
             <ServiceRow
               icon={<BackgroundIcon />}
               iconClass="srow-icon-bg"
-              name="Background Services"
+              name="Background Colour"
               detail="Replace the removed background with a solid colour, or leave it transparent."
               alwaysOn
             >
@@ -277,7 +348,7 @@ export function SpecificationStep({
                 Transparency is a first-class choice here, beside the colour, rather than something
                 you reach by switching the whole service OFF — which is how it used to work, and
                 which hid the colour box the moment you found it. Two problems with that: "turn
-                Background Services off" does not read as "give me a transparent PNG", and a user
+                Background Colour off" does not read as "give me a transparent PNG", and a user
                 looking for transparency saw nothing but a colour picker. Client feedback, and
                 fair.
 
@@ -344,33 +415,16 @@ export function SpecificationStep({
                 </>
               )}
 
-              <p className="opt-sublabel">Original shadow</p>
-              <div className="opt-radio-row">
-                <label className="opt-radio">
-                  <input
-                    type="radio"
-                    name="shadow"
-                    checked={background.shadow === 'preserve'}
-                    onChange={() => setBackground({ shadow: 'preserve' })}
-                  />
-                  Preserve
-                </label>
-                <label className="opt-radio">
-                  <input
-                    type="radio"
-                    name="shadow"
-                    checked={background.shadow === 'remove'}
-                    onChange={() => setBackground({ shadow: 'remove' })}
-                  />
-                  Remove
-                </label>
-              </div>
-              {explain && (
-                <p className="opt-help">
-                  Preserving reconstructs the photographed shadow onto the new colour. It needs a
-                  uniform original backdrop, so on a lifestyle scene it is skipped and says so.
-                </p>
-              )}
+              {/* No Preserve/Remove choice. `background.shadow` is pinned to its
+                  DEFAULT_JOB_CONFIG value, `preserve`, so every job reconstructs the photographed
+                  shadow onto the new colour — that is one of the capabilities this POC exists to
+                  show, and it is not something a user should have to find and switch on.
+
+                  It is safe to pin because the decision is already made per image, not per order:
+                  preserving needs a uniform original backdrop, and where the backdrop is not
+                  uniform the pipeline skips the shadow itself and labels the image with
+                  SHADOW_GATE_FAILED rather than smearing one on. The backend still accepts
+                  `shadow: 'remove'`, so an existing saved config using it keeps working. */}
 
               <Advanced>
                 <label className="opt-check">

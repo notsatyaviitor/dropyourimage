@@ -49,6 +49,10 @@ def settings(**kw) -> Settings:
     base = dict(
         _env_file=None,
         gemini_api_key="test-key",
+        # These tests cover the *named* subject path. Automatic detection is a separate
+        # behaviour with its own file (tests/test_auto_subject.py); leaving it on here would
+        # make every "no prompt" assertion below depend on it.
+        auto_subject_enabled=False,
         photoroom_api_key="",
         removebg_api_key="",
         fal_key="",
@@ -208,15 +212,21 @@ class TestGeminiLocator:
 
 
 class TestSubjectPromptInThePipeline:
-    async def test_no_prompt_leaves_the_packshot_path_untouched(self, mock_gemini):
+    async def test_no_prompt_with_auto_detection_off_leaves_the_packshot_path_untouched(
+        self, mock_gemini
+    ):
+        # The original contract, now conditional: with AUTO_SUBJECT_ENABLED=false an image with
+        # no named subject reaches no model at all. With it on, one locator call per image is
+        # the deliberate trade — see tests/test_auto_subject.py.
         state = mock_gemini(box_response(True, [0, 0, 500, 500]))
         result, outputs = await pipeline.process_image(
             scene_png(), "a.png", JobConfig(size=SizeSpec(width=200, height=200)),
-            settings(), engines=[LocalEngine()],
+            settings(auto_subject_enabled=False), engines=[LocalEngine()],
         )
         assert result.state is ImageState.DONE and outputs
-        assert state["n"] == 0, "no prompt must not cost a locator call"
+        assert state["n"] == 0, "no prompt must not cost a locator call when auto is off"
         assert Note.SUBJECT_LOCATED not in result.notes
+        assert Note.SUBJECT_AUTO_DETECTED not in result.notes
 
     async def test_a_prompt_crops_before_segmenting_and_says_so(self, mock_gemini):
         mock_gemini(box_response(True, [250, 250, 750, 750]))

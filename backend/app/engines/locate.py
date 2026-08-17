@@ -98,6 +98,31 @@ class Located:
     label: str
 
 
+#: Automatic subject detection: `_PROMPT` with the phrase discovered rather than supplied.
+#:
+#: Deliberately built from `_PROMPT` rather than from `_ENUMERATE_PROMPT`. Measured on a real
+#: client packshot (a supplement bottle on a display stand, 14 Aug 2026): the enumerate prompt
+#: returned nothing usable and detection silently did not run, while the named-subject path with
+#: "bottle" produced a correct tight crop. The sentence that does the work is "nothing else ...
+#: objects that merely touch or overlap it" — a product sits ON its stand, so without that clause
+#: the box swallows the stand and the segmenter has no reason to drop it.
+_AUTO_PROMPT = """Identify the single product being photographed in this image, and locate it.
+
+Return one bounding box as normalised integers in the range 0-1000, ordered
+[ymin, xmin, ymax, xmax], and a short lower-case label naming the product, e.g. "bottle", "jar",
+"shoe", "handbag".
+
+Include the whole product and nothing else. Do NOT include a stand, riser, plinth, pedestal,
+mount, bracket, clamp, pole, hook or any prop that holds, lifts or presents the product — exclude
+these even where they touch or are overlapped by the product. Do NOT include the backdrop, the
+surface it rests on, its shadow or its reflection.
+
+If several products are shown, pick the one most likely to be the photograph's subject — usually
+the largest, most central, and least occluded.
+If there is no product in the image, set found to false.
+"""
+
+
 class GeminiLocator:
     """Text prompt -> one bounding box. Advisory: failure degrades, never fails an image."""
 
@@ -169,6 +194,71 @@ class GeminiLocator:
         raw = _to_pixels(box_norm, width, height)
         if raw.is_empty():
             raise SubjectNotLocated("locator returned a degenerate box")
+
+        return Located(box=pad_and_clamp(raw, width, height, padding_pct), raw_box=raw, label=label)
+
+    async def detect(
+        self,
+        image_bytes: bytes,
+        width: int,
+        height: int,
+        *,
+        padding_pct: float = DEFAULT_PADDING_PCT,
+    ) -> Located:
+        """Find the product with no phrase supplied. Raises `SubjectNotLocated` if it cannot.
+
+        Shares `locate`'s request shape, schema, parser, padding and failure semantics on purpose:
+        that path is the one measured to produce a tight box on a real packshot, and a second
+        near-copy would drift from it. The only difference is the prompt.
+        """
+        if not self.available():
+            raise SubjectNotLocated("no GEMINI_API_KEY configured")
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": _AUTO_PROMPT},
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64.b64encode(image_bytes).decode("ascii"),
+                            }
+                        },
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": _SCHEMA,
+                "temperature": 0.0,
+            },
+        }
+
+        url = _ENDPOINT.format(model=self._settings.gemini_model)
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.gemini_timeout_seconds) as client:
+                response = await client.post(
+                    url, params={"key": self._settings.gemini_api_key}, json=payload
+                )
+        except httpx.HTTPError as exc:
+            raise SubjectNotLocated(f"detector request failed: {type(exc).__name__}") from exc
+
+        if response.status_code != 200:
+            # Body deliberately omitted: it can echo the request, including the image.
+            raise SubjectNotLocated(f"detector returned HTTP {response.status_code}")
+
+        parsed = _parse(response.json())
+        if parsed is None:
+            raise SubjectNotLocated("detector response was not usable")
+
+        found, box_norm, label = parsed
+        if not found or box_norm is None:
+            raise SubjectNotLocated("no product found in this image")
+
+        raw = _to_pixels(box_norm, width, height)
+        if raw.is_empty():
+            raise SubjectNotLocated("detector returned a degenerate box")
 
         return Located(box=pad_and_clamp(raw, width, height, padding_pct), raw_box=raw, label=label)
 
@@ -389,3 +479,32 @@ def _parse(body: object) -> tuple[bool, list[int] | None, str] | None:
         box = None
 
     return bool(parsed.get("found")), box, str(parsed.get("label", ""))[:64]
+
+
+# ---------------------------------------------------------------------------
+# Automatic subject selection
+# ---------------------------------------------------------------------------
+
+
+#: A candidate covering more of the frame than this is the model boxing the whole scene rather
+#: than an object in it. Cropping to it is a no-op at best; at worst it silently disables the
+#: whole-frame path that was already correct.
+_MAX_FRAME_FRACTION = 0.92
+
+#: Below this, the "object" is a fitting, a label or a highlight, not the subject of a packshot.
+_MIN_FRAME_FRACTION = 0.005
+
+def box_is_plausible_subject(box: BBox, width: int, height: int) -> bool:
+    """Is this box a product, or the model boxing the whole scene / a fitting?
+
+    Shared by both automatic paths so "plausible subject" has exactly one definition. Pure
+    arithmetic: the model proposes, this disposes.
+    """
+    frame = float(width * height)
+    if frame <= 0 or box.is_empty():
+        return False
+    fraction = (box.width * box.height) / frame
+    return _MIN_FRAME_FRACTION <= fraction <= _MAX_FRAME_FRACTION
+
+
+

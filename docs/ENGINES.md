@@ -37,7 +37,33 @@ white; alpha correctly stays at 0 inside a cast shadow.
 | Photoroom | ~$0.02 | **The default engine** |
 | fal.ai (BiRefNet-class) | ~$0.03–0.05 | Strong soft alpha |
 | Gemini | ~$0.0065 | Selectable, never auto-picked — see below |
+| BiRefNet (self-hosted) | $0 | Same model fal.ai serves, run in-process — see below |
 | ~~remove.bg~~ | ~~$0.20~~ | **Retired 7 Aug 2026** |
+
+### Self-hosted BiRefNet (`app/engines/birefnet_local.py`), 14 Aug 2026
+
+Added at the maintainer's request. **It is the one engine here that is not a metered API call**,
+so enabling it retires the root `CLAUDE.md` constraint *"No GPU, no self-hosted models. Everything
+AI is a metered API call."* for that engine. That is a deliberate exception, not an oversight.
+
+It is the same model family fal.ai serves at `fal.run/fal-ai/birefnet/v2`. Choosing it over that
+is a decision about cost, rate limits, vendor independence and data residency — **not about mask
+quality**, which should be comparable.
+
+What it costs:
+
+- **~2–3 GB of dependencies** (torch, torchvision, transformers, timm), kept out of
+  `requirements.txt` in `requirements-birefnet.txt` so CI and the base install are unaffected.
+- **Latency without a GPU.** Seconds per image against Photoroom's measured 0.79–0.86 s. The
+  production box is 4-core with no GPU; a 400-image order changes from minutes to hours.
+- `trust_remote_code=True` is required — BiRefNet's architecture lives in the Hub repo, not in
+  `transformers`. Pin `BIREFNET_REVISION` to a commit rather than `main` before production use,
+  so what executes is auditable.
+
+Off unless `BIREFNET_ENABLED=true`, and `available()` returns False unless the weights are already
+cached locally — `pytest` must pass on a clean checkout with no network, so nothing downloads on
+its own. torch is imported lazily inside the engine for the same reason `pytoshop` no longer is
+(see `docs/PSD.md`): a missing wheel must read as "unavailable", never as `internal_error`.
 
 ### remove.bg retirement, 7 Aug 2026
 

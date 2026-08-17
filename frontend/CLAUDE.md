@@ -35,8 +35,9 @@ pulled from over any prose description, including this one.
 - **Use their vocabulary, not ours** — but take it from the client, not from the marketing site.
   The specification sections were originally named after dropyourimage.com's own services,
   *Clipping* and *Background Services*. The client asked on 12 Aug 2026 for *Clipping* to become
-  **Background Removal**, so that is the name. Their instruction outranks the website; do not
-  "restore" the site's wording.
+  **Background Removal**, and on 14 Aug 2026 for *Background Services* to become **Background
+  Colour**, so those are the names. Their instruction outranks the website; do not "restore" the
+  site's wording.
 - English only. Skip their EN/NL/DE language switcher.
 
 ## No paid component kit

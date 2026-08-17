@@ -36,8 +36,10 @@ from app.psd import vector_path as vp
 from app.psd.fallback import build_layered_psd
 
 
-def settings() -> Settings:
-    return Settings(_env_file=None, gemini_api_key="k", photoroom_api_key="p")
+def settings(**kw) -> Settings:
+    base = dict(_env_file=None, gemini_api_key="k", photoroom_api_key="p")
+    base.update(kw)
+    return Settings(**base)
 
 
 def frame(h: int = 80, w: int = 80) -> np.ndarray:
@@ -258,6 +260,13 @@ class TestMultiObjectPipeline:
         assert tuple(out[0, 0]) == (255, 255, 255)
 
     async def test_off_by_default_leaves_the_packshot_path_untouched(self, monkeypatch):
+        """`multi_object` off must not produce layers.
+
+        `locate_many` is used as the tripwire, but it stopped being exclusive to this feature on
+        14 Aug 2026 — automatic subject detection enumerates through the same function. Auto
+        detection is disabled here so the tripwire means what it says; that it also runs is
+        covered in tests/test_auto_subject.py.
+        """
         from app import pipeline
         from app.imaging import export as E
 
@@ -272,7 +281,11 @@ class TestMultiObjectPipeline:
             export=ExportSpec(formats=[OutputFormat.PNG], match_source=False),
         )
         result, _ = await pipeline.process_image(
-            png, "shot.png", config, settings(), engines=[_Spy()]
+            png,
+            "shot.png",
+            config,
+            settings(auto_subject_enabled=False),
+            engines=[_Spy()],
         )
 
         assert Note.MULTI_OBJECT not in result.notes

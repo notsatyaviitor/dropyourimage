@@ -1,0 +1,32 @@
+# Self-hosted BiRefNet — OPTIONAL, and deliberately not in requirements.txt.
+#
+# Kept separate for three reasons:
+#   1. It is ~2-3 GB installed. Every CI run, container build and `scripts/setup.sh` would pay
+#      that cost for an engine that is off by default (`BIREFNET_ENABLED=false`).
+#   2. `pytest` must pass on a clean checkout with no API keys and no images (root CLAUDE.md).
+#      app/engines/birefnet_local.py imports torch lazily so the suite is unaffected either way,
+#      and keeping the wheels out of the base install keeps that honest.
+#   3. torch's correct wheel depends on the machine — CPU-only on the production box, CUDA here.
+#      A single pin in requirements.txt would be wrong on one of them.
+#
+# Install:
+#   cd backend
+#   .venv/bin/pip install -r requirements-birefnet.txt                      # CUDA build
+#   .venv/bin/pip install -r requirements-birefnet.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cpu              # CPU-only, ~1 GB less
+#
+# Then warm the weights once (this is the only step that touches the network):
+#   BIREFNET_ALLOW_DOWNLOAD=true .venv/bin/python -c \
+#     "from app.core.settings import Settings; from app.engines.birefnet_local import BiRefNetLocalEngine; \
+#      import os; os.environ['BIREFNET_ENABLED']='true'; \
+#      BiRefNetLocalEngine(Settings())._load_model(); print('cached')"
+#
+# Finally set BIREFNET_ENABLED=true in backend/.env.
+
+torch==2.5.1              # the runtime. CPU build is ~200 MB, CUDA build ~2.5 GB
+torchvision==0.20.1       # pulled in by BiRefNet's own modelling code (deformable ops, transforms)
+transformers==4.46.3      # AutoModelForImageSegmentation + the Hub loader
+timm==1.0.11              # BiRefNet's Swin backbone comes from timm
+einops==0.8.0             # used inside BiRefNet's remote modelling code
+kornia==0.7.3             # ditto — imported by the Hub repo's model definition
+huggingface-hub==0.26.2   # snapshot_download, used by available() to answer "cached?" offline

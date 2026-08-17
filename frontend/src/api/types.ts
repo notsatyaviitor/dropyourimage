@@ -11,7 +11,10 @@
 
 // 'removebg' stays in the union because EngineId is part of the frozen contract and the backend
 // adapter still exists — but it is retired, absent from ENGINE_POOL, and not offered in the UI.
-export type EngineId = 'photoroom' | 'removebg' | 'falai' | 'gemini' | 'local'
+// 'birefnet' is self-hosted rather than a metered API, and is only usable when the server has
+// torch and the weights on disk — the UI offers it regardless, and the backend surfaces a typed
+// error if it was chosen on a box that cannot run it.
+export type EngineId = 'photoroom' | 'removebg' | 'falai' | 'gemini' | 'local' | 'birefnet'
 export type EngineStrategy = 'auto' | 'single'
 export type FitMode = 'contain' | 'pad' | 'cover'
 export type CentringMode = 'bbox' | 'centroid'
@@ -299,6 +302,12 @@ export interface ImageResult {
   centroid_offset_px: [number, number] | null
   background_uniformity: number | null
   source_size: [number, number] | null
+  /**
+   * What the subject was taken to be when it was not named in the config. Set alongside the
+   * `subject_auto_detected` note; null on the whole-frame path. Show it — "cropped to the bottle"
+   * is a guess a human can check, "a subject was detected" is not.
+   */
+  subject_label: string | null
   /** What arrived. Paired with `format_substituted` it names both halves of the swap. */
   source_format: SourceFormat | null
   /**

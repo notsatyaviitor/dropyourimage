@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.core.settings import Settings
 from app.engines.base import BackgroundRemover
+from app.engines.birefnet_local import BiRefNetLocalEngine
 from app.engines.gemini_segment import GeminiSegmentEngine
 from app.engines.http import FalAiEngine, PhotoroomEngine, RemoveBgEngine
 from app.engines.local import LocalEngine
@@ -22,6 +23,9 @@ _CONSTRUCTORS = {
     EngineId.REMOVEBG: RemoveBgEngine,
     EngineId.FALAI: FalAiEngine,
     EngineId.GEMINI: GeminiSegmentEngine,
+    # Constructing it is free — it imports no torch until `available()` or a forward pass, so a
+    # box without torch is unaffected by its presence here.
+    EngineId.BIREFNET: BiRefNetLocalEngine,
 }
 
 # How many engines the AUTO strategy runs concurrently. Two is where the yield gain is; a third

@@ -50,10 +50,34 @@ class _Reject(enum.Enum):
     FRAGMENTED = "fragmented"
 
 # --- scoring ----------------------------------------------------------------------------
-# Target average edge width in pixels. A hard binary mask sits near 0 and looks cut out with
-# scissors; a mushy mask above ~4px looks out of focus. Real matting lands around 1-2px.
+# Target average edge width, **in pixels at `_REFERENCE_LONG_EDGE`**. A hard binary mask sits near
+# 0 and looks cut out with scissors; a mushy mask looks out of focus. Real matting lands at 1-2px
+# at this reference size.
 _TARGET_EDGE_WIDTH = 1.5
 _EDGE_WIDTH_TOLERANCE = 1.8
+
+#: The resolution the target above is calibrated at, and what makes it fair across engines.
+#:
+#: Measured 17 Aug 2026, BiRefNet on the same subject at four sizes — it segments at its native
+#: 1024 and the mask is then resized to the source, so the band widens in lockstep with the
+#: upscale factor:
+#:
+#:     source        edge width   width / upscale
+#:     900x1200        1.95 px         1.6
+#:     2000x2600       4.17 px         1.67
+#:     3500x5200       7.84 px         1.54
+#:     5504x8256      11.97 px         1.48
+#:
+#: The intrinsic edge is ~1.5px every time. Against a fixed 1.5px target the last two scored
+#: **0.0000**, so on a 45 MP client PSD a real matte lost to a rasterised polygon with no soft
+#: alpha at all. An absolute target measures the engine's output resolution, not its edge quality.
+_REFERENCE_LONG_EDGE = 1024.0
+
+#: Below this share of soft pixels the mask has no transition band worth the name — it is a
+#: stencil. Scored at zero rather than merely low, because invariant 2 in backend/CLAUDE.md is
+#: that soft alpha is never recoverable once thrown away: there is nothing for edge
+#: decontamination to correct and the halo is permanent.
+_BINARY_MASK_SOFT_RATIO = 1e-5
 
 _W_EDGE = 0.55
 _W_SOLIDITY = 0.30
@@ -209,11 +233,21 @@ def _largest_component_share(core: np.ndarray) -> float:
 
 
 def _edge_quality(alpha: np.ndarray, core: np.ndarray) -> float:
-    """Score average edge width against the target.
+    """Score average edge width against the target, at this image's resolution.
 
-    Computed as soft-alpha pixel count divided by perimeter length, which gives the mean width of
-    the transition band in pixels — a scale-invariant measure, unlike a raw soft-pixel fraction
-    that would reward a large product over a small one.
+    Width is soft-alpha pixel count divided by perimeter length, giving the mean width of the
+    transition band in pixels — independent of how big the product is in frame, unlike a raw
+    soft-pixel fraction.
+
+    Two things this must get right, both of which it once got wrong:
+
+    * **A mask with no transition band scores zero, not half.** A rasterised polygon has
+      `soft_px == 0`, which against a 1.5px target still scored ~0.50 through the Gaussian — half
+      marks for having thrown the edge away. Measured on a real client PSD: Gemini 0.7164 with
+      `soft_alpha_ratio` exactly 0.0, beating BiRefNet's 0.4647 real matte.
+    * **The target scales with the image.** An engine that segments at 1024 and has its mask
+      resized up to a 45 MP source has a band 8x wider in absolute pixels for the same quality of
+      edge. Comparing that against a fixed pixel target ranks engines by output resolution.
     """
     contours, _ = cv2.findContours(core, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     perimeter = sum(len(c) for c in contours)
@@ -221,8 +255,19 @@ def _edge_quality(alpha: np.ndarray, core: np.ndarray) -> float:
         return 0.0
 
     soft_px = float(((alpha > 0.05) & (alpha < 0.95)).sum())
+    if soft_px / max(alpha.size, 1) < _BINARY_MASK_SOFT_RATIO:
+        return 0.0
+
+    # Never below 1.0. Scaling *down* for a small image asks for a sub-pixel transition band —
+    # on a 200px fixture the target became 0.29px, so a genuinely soft edge scored 0.05 and a
+    # binary one nearly beat it. An edge cannot be finer than a pixel; the reference is the
+    # native resolution engines work at, not a proportion to be applied in both directions.
+    scale = max(1.0, max(alpha.shape[0], alpha.shape[1]) / _REFERENCE_LONG_EDGE)
+    target = _TARGET_EDGE_WIDTH * scale
+    tolerance = _EDGE_WIDTH_TOLERANCE * scale
+
     width = soft_px / perimeter
-    return float(np.exp(-(((width - _TARGET_EDGE_WIDTH) / _EDGE_WIDTH_TOLERANCE) ** 2)))
+    return float(np.exp(-(((width - target) / tolerance) ** 2)))
 
 
 def _coverage_plausibility(coverage: float) -> float:

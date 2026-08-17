@@ -424,3 +424,71 @@ class TestBusySceneHandling:
             assert verdict.candidates[0].score is not None
         else:
             assert verdict.candidates[0].rejected_reason is not None
+
+
+class TestEdgeQualityIsFairAcrossResolutions:
+    """Regression guard for a real mis-ranking found on client PSDs, 17 Aug 2026.
+
+    A 45 MP client packshot was delivered with a hard-edged Gemini cut-out because the auto-pick
+    score ranked it above a real matte:
+
+        gemini    score=0.7164   soft_alpha_ratio=0.0
+        birefnet  score=0.4647   soft_alpha_ratio=0.00094
+
+    Two independent defects, one test class:
+
+    * A rasterised polygon has no transition band at all, yet scored ~0.50 on edge quality through
+      the Gaussian's tail — half marks for discarding the edge, against invariant 2.
+    * The 1.5px target was absolute. An engine that segments at 1024 and has its mask resized up
+      to a 45 MP source shows a band 8x wider for the same quality, so the metric was ranking
+      engines by output resolution. Measured widths: 1.95px at 900x1200 rising to 11.97px at
+      5504x8256 — almost exactly the upscale factor each time.
+    """
+
+    @staticmethod
+    def _disc(size: int, radius: int, band: float) -> np.ndarray:
+        """A disc whose soft band is `band` pixels wide, at any canvas size."""
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+        d = np.sqrt((xx - size / 2) ** 2 + (yy - size / 2) ** 2)
+        return np.clip((radius - d) / max(band, 1e-6) + 0.5, 0.0, 1.0).astype(np.float32)
+
+    def test_a_mask_with_no_soft_alpha_scores_zero_on_edge_quality(self):
+        # Not "low" — zero. Soft alpha is unrecoverable once discarded, so there is nothing for
+        # decontamination to fix and the halo against a saturated background is permanent.
+        hard = (self._disc(400, 120, band=1.0) > 0.5).astype(np.float32)
+        assert autopick._edge_quality(hard, (hard > 0.5).astype(np.uint8)) == 0.0
+
+    def test_a_real_matte_beats_a_stencil(self):
+        soft = self._disc(400, 120, band=2.0)
+        hard = (soft > 0.5).astype(np.float32)
+        v = autopick.choose(
+            [result(soft, EngineId.PHOTOROOM), result(hard, EngineId.GEMINI)]
+        )
+        assert v.winner.engine is EngineId.PHOTOROOM
+        soft_score = next(c.score for c in v.candidates if c.engine is EngineId.PHOTOROOM)
+        hard_score = next(c.score for c in v.candidates if c.engine is EngineId.GEMINI)
+        assert soft_score > hard_score
+
+    def test_the_same_quality_of_edge_scores_alike_at_any_resolution(self):
+        """The defect that let a hard mask win: quality must not track image size.
+
+        The band is scaled with the canvas so every case is the *same* edge, just photographed
+        larger — which is exactly what an engine's mask resized up to a big source looks like.
+        """
+        scores = []
+        for size in (512, 1024, 3000, 6000):
+            band = 1.5 * max(1.0, size / 1024.0)
+            a = self._disc(size, size // 4, band=band)
+            scores.append(autopick._edge_quality(a, (a > 0.5).astype(np.uint8)))
+        assert min(scores) > 0.55, f"resolution changes the verdict: {scores}"
+        assert max(scores) - min(scores) < 0.45, f"scores drift with size: {scores}"
+
+    def test_a_small_image_is_not_asked_for_a_sub_pixel_edge(self):
+        """The scale must never drop below 1.0.
+
+        Scaling down for a small canvas made the target 0.29px on a 200px fixture, so a genuinely
+        soft edge scored 0.05 and very nearly lost to a binary one. An edge cannot be finer than
+        a pixel.
+        """
+        a = self._disc(200, 60, band=1.2)
+        assert autopick._edge_quality(a, (a > 0.5).astype(np.uint8)) > 0.7

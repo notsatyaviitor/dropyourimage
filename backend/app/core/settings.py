@@ -27,11 +27,63 @@ class Settings(BaseSettings):
     # most expensive engine by 10x. The adapter and its tests remain in the tree, unused, so
     # re-adding it here is the only change needed to bring it back.
     #
-    # `gemini` is also absent, and that is load-bearing rather than an oversight. Its mask is a
-    # rasterised polygon, which scores 0.7246 and passes every one of autopick's reject rules —
-    # so in an AUTO pair it could out-score Photoroom while shipping a visibly worse edge. It is
-    # reachable only through EngineStrategy.SINGLE, where an operator has chosen it knowingly.
+    # `gemini` was absent here until 14 Aug 2026, because its mask is a rasterised polygon that
+    # scores 0.7246 and passes every one of autopick's reject rules — in a pair it could out-score
+    # a better engine while shipping a visibly worse edge.
+    #
+    # It is now deployable in an AUTO pair, but **only against an engine that beats it on the
+    # deterministic score**, which was measured rather than assumed. On the studio fixture:
+    #
+    #     birefnet  0.9973   (99 distinct alpha values, 1307 soft edge pixels)
+    #     gemini    0.7246   ( 2 distinct alpha values,    0 soft edge pixels)
+    #
+    # The 0.27 margin comes from `_W_EDGE` (0.55 of the score) measuring transition-band width,
+    # where a hard polygon mask cannot compete. Pair gemini with anything that does NOT clear it
+    # comfortably and the hazard in the paragraph above is live again — re-measure before changing
+    # this line, do not reason about it.
+    #
+    # The shipped default stays photoroom-led on purpose. `ENGINE_POOL=gemini,birefnet` is right
+    # for a deployment with a GPU and the weights installed; on a box without torch, birefnet is
+    # unavailable and that pool silently degrades to gemini alone — the hard-edged engine, running
+    # unopposed. Set it per deployment in `.env`, where the machine is known.
     engine_pool: str = "photoroom,falai"
+
+    # --- automatic subject detection -----------------------------------------
+    #
+    # When `cutout.subject_prompt` is empty, enumerate the objects in the frame and crop to the
+    # dominant one instead of segmenting whole-frame. Costs one Gemini call per image on top of
+    # segmentation, on every image — about $0.0065 each, so roughly $2.60 on a 400-image order,
+    # plus its latency. It also silently chooses between objects on an ambiguous scene, which is
+    # why `SUBJECT_AUTO_AMBIGUOUS` exists and must not be swallowed by the UI.
+    #
+    # An operational switch rather than a `JobConfig` field on purpose: it changes how every image
+    # in the deployment is treated, and the frozen API contract should not grow a flag to say
+    # "behave the way this server is configured to behave".
+    #
+    # On an image showing several products this crops to one of them without asking. Naming the
+    # subject in `cutout.subject_prompt` is the exact path and always wins.
+    auto_subject_enabled: bool = True
+
+    # --- self-hosted BiRefNet (app/engines/birefnet_local.py) -----------------
+    #
+    # The one engine in this codebase that is not a metered API call. Off unless
+    # `BIREFNET_ENABLED=true`, because enabling it changes the deployment's requirements: torch
+    # and its dependencies are ~2-3 GB installed, and without a GPU inference is measured in
+    # seconds per image rather than Photoroom's ~0.8 s.
+    birefnet_enabled: bool = False
+    birefnet_model_id: str = "ZhengPeng7/BiRefNet"
+    # Pinned, not floating on `main`. The model is loaded with `trust_remote_code=True`, which
+    # executes modelling code straight from the Hub — pinning a revision is what makes that
+    # auditable rather than "whatever was pushed this morning". Re-pin deliberately.
+    birefnet_revision: str = "main"
+    # "auto" picks CUDA when torch reports it, else CPU. Force with "cpu" or "cuda".
+    birefnet_device: str = "auto"
+    #: Square input the network sees. 1024 is BiRefNet's training resolution; smaller is faster
+    #: and visibly softer. The mask is resized back to the source by `fit_alpha_to_source`.
+    birefnet_input_size: int = 1024
+    # Off by default so that neither `pytest` nor a cold container ever reaches the network on
+    # its own. Warm the cache deliberately (see docs/ENGINES.md), then leave this false.
+    birefnet_allow_download: bool = False
 
     # --- auto-pick tie-break --------------------------------------------------
     gemini_api_key: str = ""
@@ -255,6 +307,9 @@ class Settings(BaseSettings):
             # timeout are per-task.
             EngineId.GEMINI: self.gemini_api_key,
             EngineId.LOCAL: "n/a",
+            # Self-hosted: there is no key to configure, and `available()` answers the real
+            # question (are the weights on disk) instead.
+            EngineId.BIREFNET: "n/a",
         }.get(engine, "")
 
     @property
