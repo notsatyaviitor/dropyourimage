@@ -45,6 +45,11 @@ _MIN_BG_FRACTION = 0.05
 # is presumed to be shadow and excluded from the plate fit.
 _CLEAN_PERCENTILE = 70.0
 
+# Upper bound on the pixels fed to the plate fit. The surface has six free parameters, so the
+# coefficients are pinned long before this; past it the solve only gets slower. Raising it does
+# not improve the plate measurably, and lowering it below ~10k starts to show on noisy sweeps.
+_MAX_PLATE_SAMPLES = 250_000
+
 # Relative residual at which uniformity scores zero. A studio sweep sits near 0.01; a furnished
 # room is far above it.
 _UNIFORMITY_TOLERANCE = 0.05
@@ -147,6 +152,28 @@ def _polynomial_basis(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.stack([np.ones_like(x), x, y, x * x, x * y, y * y], axis=-1)
 
 
+def _evaluate_surface(coeffs: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Evaluate the fitted quadratic over a full ``(h, w, 3)`` grid.
+
+    The basis is separable apart from the ``xy`` term, so this needs one full-size temporary
+    rather than six. Building the ``(h, w, 6)`` basis and contracting it against the
+    coefficients — the obvious way, and what this replaced — allocates 1.2 GB on a 50 MP frame
+    and was the second-largest cost in stage 2 after the fit itself.
+    """
+    c = np.asarray(coeffs, dtype=np.float32)          # (6, 3), ordered as `_polynomial_basis`
+    x = (np.arange(w, dtype=np.float32) / max(w - 1, 1) - 0.5).reshape(1, w)
+    y = (np.arange(h, dtype=np.float32) / max(h - 1, 1) - 0.5).reshape(h, 1)
+    xy = y * x                                        # the one unavoidable (h, w) temporary
+
+    out = np.empty((h, w, 3), dtype=np.float32)
+    for ch in range(3):
+        c0, c1, c2, c3, c4, c5 = (float(v) for v in c[:, ch])
+        row = c0 + c1 * x + c3 * (x * x)              # (1, w)
+        col = c2 * y + c5 * (y * y)                   # (h, 1)
+        out[..., ch] = row + col + c4 * xy
+    return out
+
+
 def estimate_background_plate(rgb_linear: np.ndarray, alpha: np.ndarray) -> PlateEstimate:
     """Reconstruct the bare backdrop, and score how backdrop-like it actually was.
 
@@ -181,20 +208,26 @@ def estimate_background_plate(rgb_linear: np.ndarray, alpha: np.ndarray) -> Plat
     if clean.sum() < 32:                       # too few samples to fit; widen to all background
         clean = bg_bool
 
-    ys, xs = np.nonzero(clean)
+    # Fit on a bounded, evenly strided subset of the clean pixels rather than all of them. The
+    # surface has six free parameters, so a quarter of a million well-spread samples pin it as
+    # tightly as fifty million do, and the cost stops scaling with sensor size. Fitting the full
+    # set was the single largest cost in the whole pipeline — a 50 MP frame spent 7.7 s inside
+    # `lstsq` alone, on top of a 480 MB basis matrix. The stride is fixed and derived only from
+    # the sample count, never randomised, so determinism is unaffected.
+    flat_idx = np.nonzero(clean.ravel())[0]
+    if flat_idx.size > _MAX_PLATE_SAMPLES:
+        # linspace, not a `[::step]` slice. A slice with an integer step overshoots whenever the
+        # count is not a clean multiple and the trailing truncation then keeps only a prefix —
+        # which in raster order is the *top* of the frame, exactly the bias a vignette fit must
+        # not have. linspace spreads the samples over the whole set at any ratio.
+        picks = np.linspace(0, flat_idx.size - 1, _MAX_PLATE_SAMPLES).astype(np.int64)
+        flat_idx = flat_idx[picks]
+
     # Centred, normalised coordinates keep the least-squares system well conditioned at any size.
-    sx = (xs / max(w - 1, 1) - 0.5).astype(np.float32)
-    sy = (ys / max(h - 1, 1) - 0.5).astype(np.float32)
+    sx = ((flat_idx % w) / max(w - 1, 1) - 0.5).astype(np.float32)
+    sy = ((flat_idx // w) / max(h - 1, 1) - 0.5).astype(np.float32)
     basis = _polynomial_basis(sx, sy)
-
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    full_basis = _polynomial_basis(
-        (xx / max(w - 1, 1) - 0.5).astype(np.float32),
-        (yy / max(h - 1, 1) - 0.5).astype(np.float32),
-    )
-
-    plate = np.empty_like(rgb)
-    residuals = np.empty((xs.size, 3), dtype=np.float32)
+    values = rgb.reshape(-1, 3)[flat_idx]
 
     # threadpool_limits, not an env var: `lstsq` and the matmuls below go through BLAS/LAPACK,
     # whose thread count some builds do not reliably take from OMP/OPENBLAS_NUM_THREADS at this
@@ -204,16 +237,19 @@ def estimate_background_plate(rgb_linear: np.ndarray, alpha: np.ndarray) -> Plat
     # when it was loaded, so it is applied here, at the actual point of use, rather than trusted
     # to have been set correctly once at startup.
     with threadpool_limits(limits=1):
-        for ch in range(3):
-            coeffs, *_ = np.linalg.lstsq(basis, rgb[..., ch][clean], rcond=None)
-            plate[..., ch] = full_basis @ coeffs.astype(np.float32)
-            residuals[:, ch] = rgb[..., ch][clean] - (basis @ coeffs)
+        # One solve for all three channels. `lstsq` accepts an (N, 3) right-hand side and the
+        # expensive part is factorising `basis`, which is shared — three separate calls did that
+        # work three times over.
+        coeffs, *_ = np.linalg.lstsq(basis, values, rcond=None)
+        fitted = basis @ coeffs
 
-    plate = np.clip(plate, 1e-4, 1.0)
+    residuals = values - fitted
+    plate = np.clip(_evaluate_surface(coeffs, h, w), 1e-4, 1.0)
 
     # Uniformity: median absolute residual relative to the plate's own level. Robust to the
-    # handful of stray bright pixels a real photograph always has.
-    level = float(np.median(luminance(plate)[clean])) + 1e-6
+    # handful of stray bright pixels a real photograph always has. Taken at the fitted sample
+    # points, which is the same population the residuals come from.
+    level = float(np.median(luminance(np.clip(fitted, 1e-4, 1.0)))) + 1e-6
     rel_mad = float(np.median(np.abs(residuals))) / level
     uniformity = float(np.clip(1.0 - rel_mad / _UNIFORMITY_TOLERANCE, 0.0, 1.0))
 

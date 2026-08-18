@@ -17,6 +17,7 @@ way that looks like a subtle dark rim around every cut-out rather than like a cr
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -63,6 +64,23 @@ def srgb_decode(encoded: np.ndarray) -> np.ndarray:
     """
     x = np.asarray(encoded, dtype=np.float32)
     return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
+
+
+@lru_cache(maxsize=1)
+def _srgb_decode_u8_table() -> np.ndarray:
+    """The 256 float32 values `srgb_decode(from_uint8(x))` produces, for x in 0..255."""
+    return srgb_decode(np.arange(256, dtype=np.float32) / 255.0)
+
+
+def srgb_decode_u8(encoded_u8: np.ndarray) -> np.ndarray:
+    """`srgb_decode(from_uint8(x))` for 8-bit input, via a lookup table.
+
+    **Byte-exact**, not an approximation: `from_uint8` is an exact division by 255 and the EOTF
+    is applied per component, so there are only 256 reachable outputs and the table holds
+    precisely them. Worth having because the piecewise `np.where` evaluates the 2.4 power over
+    every pixel of *both* branches before selecting — 1.3 s on a 50 MP frame, against a gather.
+    """
+    return _srgb_decode_u8_table()[np.asarray(encoded_u8, dtype=np.uint8)]
 
 
 def srgb_encode(linear: np.ndarray) -> np.ndarray:

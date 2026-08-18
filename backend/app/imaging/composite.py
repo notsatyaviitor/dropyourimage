@@ -139,18 +139,28 @@ def decontaminate_edges(
     if not band.any():
         return o.copy()
 
-    a3 = a[..., None]
-    safe = np.maximum(a3, _DECONTAM_ALPHA_FLOOR)
-    unmixed = np.clip((o - (1.0 - a3) * b) / safe, 0.0, 1.0)
+    # Gather the band and work only on it. The blend below is the identity wherever the weight is
+    # zero, and the weight is zero everywhere outside the band, so this is exact rather than an
+    # approximation. It matters because the band is a thin rim — well under 1% of a packshot —
+    # while the full-frame version paid for a divide, a clip and a lerp over every pixel of a
+    # 50 MP master.
+    out = o.copy()
+    idx = np.nonzero(band.ravel())[0]
+    o_b = o.reshape(-1, 3)[idx]
+    a_b = a.reshape(-1)[idx][:, None]
+    b_b = b.reshape(-1, 3)[idx]
+
+    safe = np.maximum(a_b, _DECONTAM_ALPHA_FLOOR)
+    unmixed = np.clip((o_b - (1.0 - a_b) * b_b) / safe, 0.0, 1.0)
 
     # Confidence ramp: 0 at the floor, 1 at full. Below the floor we keep the observation, which
     # is wrong but stable; guessing there produces speckle that looks worse than a faint halo.
     t = np.clip(
-        (a - _DECONTAM_ALPHA_FLOOR) / (_DECONTAM_ALPHA_FULL - _DECONTAM_ALPHA_FLOOR), 0.0, 1.0
+        (a_b - _DECONTAM_ALPHA_FLOOR) / (_DECONTAM_ALPHA_FULL - _DECONTAM_ALPHA_FLOOR), 0.0, 1.0
     )
-    w = (t * band.astype(np.float32))[..., None]
 
-    return (o * (1.0 - w) + unmixed * w).astype(np.float32)
+    out.reshape(-1, 3)[idx] = (o_b * (1.0 - t) + unmixed * t).astype(np.float32)
+    return out
 
 
 def flatten(

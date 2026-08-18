@@ -106,18 +106,22 @@ def decode(
             raise UnsupportedImageError(f"could not convert mode {img.mode!r}: {exc}") from exc
 
     arr = np.asarray(img)
-    if arr.dtype == np.uint16:
-        encoded = (arr.astype(np.float32) / 65535.0).astype(np.float32)
-    elif arr.dtype == np.uint8:
-        encoded = C.from_uint8(arr)
+    if arr.ndim == 2:
+        arr = np.dstack([arr] * 3)
+
+    if arr.dtype == np.uint8:
+        # The overwhelmingly common case, and the one worth a fast path: the table gives the
+        # identical float32 values the elementwise EOTF would, without evaluating a power over
+        # every pixel of a full-resolution master.
+        alpha = C.from_uint8(arr[..., 3]) if arr.shape[-1] == 4 else None
+        rgb_linear = C.srgb_decode_u8(arr[..., :3])
     else:
-        encoded = np.clip(arr.astype(np.float32), 0.0, 1.0)
-
-    if encoded.ndim == 2:
-        encoded = np.dstack([encoded] * 3)
-
-    alpha = encoded[..., 3].copy() if encoded.shape[-1] == 4 else None
-    rgb_linear = C.srgb_decode(encoded[..., :3])
+        if arr.dtype == np.uint16:
+            encoded = (arr.astype(np.float32) / 65535.0).astype(np.float32)
+        else:
+            encoded = np.clip(arr.astype(np.float32), 0.0, 1.0)
+        alpha = encoded[..., 3].copy() if encoded.shape[-1] == 4 else None
+        rgb_linear = C.srgb_decode(encoded[..., :3])
 
     return DecodedImage(
         rgb_linear=rgb_linear.astype(np.float32),
