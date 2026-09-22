@@ -98,7 +98,7 @@ export function Sidebar({ onCreateOrder }: { onCreateOrder: () => void }) {
             fill="white"
           />
         </svg>
-        <span className="brand-name">DROPYOURIMAGE</span>
+        <span className="brand-name">Image Processing</span>
       </div>
 
       <div className="sidebar-create">
